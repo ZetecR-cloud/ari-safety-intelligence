@@ -19,34 +19,45 @@ function angleDiff(a: number, b: number) {
   return d > 180 ? 360 - d : d;
 }
 function headTailFrom(wdir: number, wspd: number, rwyMag: number) {
-  // + headwind, - tailwind
   const ang = angleDiff(wdir, rwyMag) * Math.PI / 180;
-  return Math.round(Math.cos(ang) * wspd);
+  return Math.round(Math.cos(ang) * wspd); // +head / -tail
 }
 function crossFrom(wdir: number, wspd: number, rwyMag: number) {
   const ang = angleDiff(wdir, rwyMag) * Math.PI / 180;
   return Math.round(Math.abs(Math.sin(ang) * wspd));
 }
 
-// --- ③ AMBER/RED理由の優先順位付け（最重要を先頭に固定）
+// --- 時刻表示（PCローカル時刻を表示しない）---
+// Date.now() はUTC基準のタイムスタンプ。表示は必ず timeZone を指定。
+function fmtZoned(ms: number, timeZone: string) {
+  try {
+    const dtf = new Intl.DateTimeFormat("en-GB", {
+      timeZone,
+      year: "numeric",
+      month: "2-digit",
+      day: "2-digit",
+      hour: "2-digit",
+      minute: "2-digit",
+      second: "2-digit",
+      hour12: false,
+      timeZoneName: "short",
+    });
+    return dtf.format(new Date(ms));
+  } catch {
+    return `TZ ERROR (${timeZone})`;
+  }
+}
+
+// --- ③ AMBER/RED理由の優先順位 ---
 function rankReason(r: string) {
   const s = r.toUpperCase();
-
-  // TAF hard red
   if (s.includes("TEMPO") && (s.includes("TS") || s.includes("CB"))) return 0;
-
-  // Limit exceed
   if (s.includes("TAILWIND") && s.includes(">")) return 1;
   if (s.includes("CROSSWIND") && s.includes(">")) return 2;
-
-  // High but within limits
   if (s.includes("TAILWIND HIGH")) return 3;
   if (s.includes("CROSSWIND HIGH")) return 4;
-
-  // Prob/Trend risks
   if (s.includes("PROB") && (s.includes("TS") || s.includes("CB"))) return 5;
   if (s.includes("FM") || s.includes("BECMG")) return 6;
-
   return 50;
 }
 function sortReasons(reasons: string[]) {
@@ -93,9 +104,16 @@ function Meter({ label, value, limit }: { label: string; value: number; limit: n
 }
 
 export default function Home() {
-  // ① ICAO typeahead
-  const [icao, setIcao] = useState("RJTT");         // 実際に採用されているICAO
-  const [icaoQuery, setIcaoQuery] = useState("RJTT"); // 入力欄に表示される文字
+  // 時刻（UTC＋空港ローカル）を秒更新
+  const [nowMs, setNowMs] = useState<number>(() => Date.now());
+  useEffect(() => {
+    const id = setInterval(() => setNowMs(Date.now()), 1000);
+    return () => clearInterval(id);
+  }, []);
+
+  // ICAO typeahead
+  const [icao, setIcao] = useState("RJTT");
+  const [icaoQuery, setIcaoQuery] = useState("RJTT");
   const icaoInputRef = useRef<HTMLInputElement | null>(null);
 
   const [rwyId, setRwyId] = useState<string>("");
@@ -107,18 +125,21 @@ export default function Home() {
   const [judge, setJudge] = useState<any>(null);
   const [loading, setLoading] = useState(false);
 
-  // 空港候補（タイプ中に絞り込み）
   const airportCandidates = useMemo(() => {
     const q = (icaoQuery || "").trim().toUpperCase();
-    const list = airports.map(a => a.icao).sort();
+    const list = airports.map((a) => a.icao).sort();
     if (!q) return list.slice(0, 30);
-    return list.filter(code => code.includes(q)).slice(0, 30);
+    return list.filter((code) => code.includes(q)).slice(0, 30);
   }, [icaoQuery]);
 
-  const airport = useMemo(() => airports.find(a => a.icao === icao) ?? airports[0], [icao]);
+  const airport = useMemo(() => airports.find((a) => a.icao === icao) ?? airports[0], [icao]);
   const runways = airport?.runways ?? [];
 
-  // ② RWY 推奨表示（Headwind最大 + Tailwind最小を上位に）
+  // ★表示用：UTCと空港現地時刻（DST自動）
+  const utcNow = useMemo(() => fmtZoned(nowMs, "UTC"), [nowMs]);
+  const aptLocalNow = useMemo(() => fmtZoned(nowMs, airport?.tz || "UTC"), [nowMs, airport?.tz]);
+
+  // RWY 推奨（風が取れていれば）
   const recommendedRunways = useMemo(() => {
     if (!runways.length) return [];
     const wind = wx?.wind;
@@ -126,30 +147,22 @@ export default function Home() {
     const wspd = wind?.spd ?? 0;
     const gust = wind?.gust ?? null;
 
-    const scored = runways.map(r => {
-      const headSteady = headTailFrom(wdir, wspd, r.mag); // +head / -tail
+    const scored = runways.map((r) => {
+      const headSteady = headTailFrom(wdir, wspd, r.mag);
       const tailSteady = headSteady < 0 ? Math.abs(headSteady) : 0;
-
       const crossSteady = crossFrom(wdir, wspd, r.mag);
 
       const headPeak = gust ? headTailFrom(wdir, gust, r.mag) : null;
       const tailPeak = headPeak !== null && headPeak < 0 ? Math.abs(headPeak) : null;
       const crossPeak = gust ? crossFrom(wdir, gust, r.mag) : null;
 
-      // スコア：headwindを強く評価、tailwindを重く減点、crosswindも軽く減点（“迷いを減らす”用の実用スコア）
       const tailUse = tailPeak ?? tailSteady;
       const crossUse = crossPeak ?? crossSteady;
       const headUse = Math.max(0, headPeak ?? headSteady);
 
       const score = headUse * 10 - tailUse * 30 - crossUse * 2;
 
-      return {
-        r,
-        score,
-        headUse,
-        tailUse,
-        crossUse,
-      };
+      return { r, score, headUse, tailUse, crossUse };
     });
 
     return scored.sort((a, b) => b.score - a.score);
@@ -158,10 +171,9 @@ export default function Home() {
   const selectedRwy = useMemo(() => {
     if (!runways.length) return null;
     if (!rwyId) return runways[0];
-    return runways.find(r => r.id === rwyId) ?? runways[0];
+    return runways.find((r) => r.id === rwyId) ?? runways[0];
   }, [runways, rwyId]);
 
-  // airportが変わったら RWY を初期化（推奨1位があればそれ）
   useEffect(() => {
     if (!runways.length) return;
     const best = recommendedRunways[0]?.r ?? runways[0];
@@ -169,12 +181,10 @@ export default function Home() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [icao, runways.length]);
 
-  // 入力確定（Enter/Blur/候補クリックに相当）
   function commitIcao(next: string) {
     const code = (next || "").trim().toUpperCase();
-    const ok = airports.some(a => a.icao === code);
+    const ok = airports.some((a) => a.icao === code);
     if (!ok) {
-      // 見つからない時は元に戻す（迷い防止）
       setIcaoQuery(icao);
       return;
     }
@@ -207,9 +217,7 @@ export default function Home() {
       tafText: data.taf,
     });
 
-    // ③ 理由の優先順位付け
     out.reason = sortReasons(out.reason ?? []);
-
     setJudge(out);
   }
 
@@ -218,7 +226,6 @@ export default function Home() {
     if (best) setRwyId(best.id);
   }
 
-  // ⑤ PDFボタン：RED/AMBER時だけ目立つ
   const decision: "GREEN" | "AMBER" | "RED" = judge?.decision ?? "GREEN";
   const pdfEmphasis = decision === "RED" || decision === "AMBER";
 
@@ -237,6 +244,9 @@ export default function Home() {
       decision: judge.decision,
       reason: judge.reason,
       tafBlocks: judge.tafRisk?.blocks ?? [],
+      utcNow,
+      aptLocalNow,
+      aptTimeZone: airport?.tz || "UTC",
     };
 
     const res = await fetch("/api/release", {
@@ -258,7 +268,6 @@ export default function Home() {
 
   return (
     <main style={{ padding: 18, fontFamily: "system-ui, -apple-system, Segoe UI, sans-serif" }}>
-      {/* ④ Mobile対応（3カラム→縦積み） */}
       <style jsx>{`
         .grid {
           display: grid;
@@ -289,6 +298,21 @@ export default function Home() {
         <div>
           <div style={{ fontSize: 20, fontWeight: 800 }}>ARI Safety Intelligence</div>
           <div style={{ fontSize: 12, opacity: 0.7 }}>Inputs → Decision → Evidence (Dispatch-style)</div>
+
+          {/* ★ UTC / Airport Local Time（DST自動） */}
+          <div style={{ marginTop: 8, display: "flex", gap: 10, flexWrap: "wrap" }}>
+            <div style={{ border: "1px solid #e9ecef", borderRadius: 14, padding: "8px 10px", background: "#fff" }}>
+              <div style={{ fontSize: 11, opacity: 0.7 }}>UTC NOW</div>
+              <div style={{ fontSize: 13, fontWeight: 800 }}>{utcNow}</div>
+            </div>
+
+            <div style={{ border: "1px solid #e9ecef", borderRadius: 14, padding: "8px 10px", background: "#fff" }}>
+              <div style={{ fontSize: 11, opacity: 0.7 }}>
+                {icao} LOCAL NOW ({airport?.tz || "UTC"})
+              </div>
+              <div style={{ fontSize: 13, fontWeight: 800 }}>{aptLocalNow}</div>
+            </div>
+          </div>
         </div>
 
         <div className="actions" style={{ display: "flex", gap: 10 }}>
@@ -302,14 +326,7 @@ export default function Home() {
 
           <button
             onClick={run}
-            style={{
-              padding: "10px 12px",
-              borderRadius: 12,
-              border: "1px solid #212529",
-              background: "#212529",
-              color: "#fff",
-              fontWeight: 700,
-            }}
+            style={{ padding: "10px 12px", borderRadius: 12, border: "1px solid #212529", background: "#212529", color: "#fff", fontWeight: 700 }}
           >
             Run Dispatch Check
           </button>
@@ -338,7 +355,6 @@ export default function Home() {
         <section style={{ border: "1px solid #dee2e6", borderRadius: 16, padding: 14, background: "#fff" }}>
           <div style={{ fontWeight: 800, marginBottom: 10 }}>Inputs</div>
 
-          {/* ① ICAO typeahead */}
           <label style={{ display: "block", fontSize: 12, opacity: 0.75 }}>Airport (ICAO)</label>
           <input
             ref={icaoInputRef}
@@ -349,7 +365,6 @@ export default function Home() {
               if (e.key === "Enter") {
                 e.preventDefault();
                 commitIcao(icaoQuery);
-                // 迷い防止：確定したらフォーカスを外す
                 (e.currentTarget as HTMLInputElement).blur();
               }
               if (e.key === "Escape") {
@@ -361,7 +376,6 @@ export default function Home() {
             style={{ width: "100%", padding: 10, borderRadius: 12, border: "1px solid #ced4da", margin: "6px 0 8px" }}
           />
 
-          {/* 候補リスト（クリックで確定） */}
           <div style={{ display: "grid", gap: 6, maxHeight: 170, overflow: "auto", paddingBottom: 8 }}>
             {airportCandidates.map((code) => (
               <button
@@ -385,14 +399,9 @@ export default function Home() {
             ))}
           </div>
 
-          {/* ② RWY 推奨（上に来る、推奨表示する） */}
           <label style={{ display: "block", fontSize: 12, opacity: 0.75, marginTop: 6 }}>Runway</label>
           <div style={{ display: "flex", gap: 8, margin: "6px 0 12px" }}>
-            <select
-              value={rwyId}
-              onChange={(e) => setRwyId(e.target.value)}
-              style={{ flex: 1, padding: 10, borderRadius: 12, border: "1px solid #ced4da" }}
-            >
+            <select value={rwyId} onChange={(e) => setRwyId(e.target.value)} style={{ flex: 1, padding: 10, borderRadius: 12, border: "1px solid #ced4da" }}>
               {recommendedRunways.map((x, idx) => (
                 <option key={x.r.id} value={x.r.id}>
                   {idx === 0 ? "★ " : ""}
@@ -401,32 +410,20 @@ export default function Home() {
               ))}
             </select>
 
-            <button
-              onClick={setBestRwy}
-              style={{ padding: "10px 10px", borderRadius: 12, border: "1px solid #ced4da", background: "#fff" }}
-              title="Select recommended runway"
-            >
+            <button onClick={setBestRwy} style={{ padding: "10px 10px", borderRadius: 12, border: "1px solid #ced4da", background: "#fff" }} title="Select recommended runway">
               Best
             </button>
           </div>
 
           <label style={{ display: "block", fontSize: 12, opacity: 0.75 }}>Runway Surface</label>
-          <select
-            value={surface}
-            onChange={(e) => setSurface(e.target.value as RwySurface)}
-            style={{ width: "100%", padding: 10, borderRadius: 12, border: "1px solid #ced4da", margin: "6px 0 12px" }}
-          >
+          <select value={surface} onChange={(e) => setSurface(e.target.value as RwySurface)} style={{ width: "100%", padding: 10, borderRadius: 12, border: "1px solid #ced4da", margin: "6px 0 12px" }}>
             <option value="DRY">DRY</option>
             <option value="WET">WET</option>
             <option value="CONTAM">CONTAM</option>
           </select>
 
           <label style={{ display: "block", fontSize: 12, opacity: 0.75 }}>Approach Category</label>
-          <select
-            value={approachCat}
-            onChange={(e) => setApproachCat(e.target.value as ApproachCat)}
-            style={{ width: "100%", padding: 10, borderRadius: 12, border: "1px solid #ced4da", margin: "6px 0 12px" }}
-          >
+          <select value={approachCat} onChange={(e) => setApproachCat(e.target.value as ApproachCat)} style={{ width: "100%", padding: 10, borderRadius: 12, border: "1px solid #ced4da", margin: "6px 0 12px" }}>
             <option value="CATI">CAT I</option>
             <option value="CATII">CAT II</option>
             <option value="CATIII">CAT III</option>
@@ -447,7 +444,7 @@ export default function Home() {
         <section style={{ border: "1px solid #dee2e6", borderRadius: 16, padding: 14, background: "#fff" }}>
           <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 10 }}>
             <div style={{ fontWeight: 800 }}>Decision</div>
-            <Badge v={decision} />
+            <Badge v={judge?.decision ?? "GREEN"} />
           </div>
 
           <div style={{ marginTop: 12, display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12 }}>
@@ -470,8 +467,6 @@ export default function Home() {
 
           <div style={{ marginTop: 12, border: "1px solid #e9ecef", borderRadius: 14, padding: 12 }}>
             <div style={{ fontWeight: 800, marginBottom: 6 }}>Why</div>
-
-            {/* ③ 優先順位付け済みの理由 */}
             {reasons.slice(0, 4).map((r, i) => (
               <div key={i} style={{ fontSize: 13, margin: "6px 0" }}>
                 • {r}
