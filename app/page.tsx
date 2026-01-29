@@ -716,6 +716,13 @@ export default function Home() {
             {!judge?.tafRisk?.blocks?.length && <div className="tafItem muted">— (auto re-check after WX fetch)</div>}
           </div>
 
+          {/* ======================= TAF TIMELINE (UTC)======================= */}
+<TafTimeline
+  blocks={judge?.tafRisk?.blocks ?? []}
+  nowZ={utcNow}
+/>
+
+
           <div className="muted" style={{ marginTop: 12 }}>Limits used</div>
           <pre style={{ marginTop: 8 }}>{judge ? JSON.stringify(judge.limits, null, 2) : "—"}</pre>
         </Card>
