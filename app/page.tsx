@@ -28,7 +28,6 @@ function crossFrom(wdir: number, wspd: number, rwyMag: number) {
 }
 
 // --- 時刻表示（PCローカル時刻を表示しない）---
-// Date.now() はUTC基準のタイムスタンプ。表示は必ず timeZone を指定。
 function fmtZoned(ms: number, timeZone: string) {
   try {
     const dtf = new Intl.DateTimeFormat("en-GB", {
@@ -48,7 +47,7 @@ function fmtZoned(ms: number, timeZone: string) {
   }
 }
 
-// --- ③ AMBER/RED理由の優先順位 ---
+// --- 理由の優先順位 ---
 function rankReason(r: string) {
   const s = r.toUpperCase();
   if (s.includes("TEMPO") && (s.includes("TS") || s.includes("CB"))) return 0;
@@ -64,47 +63,58 @@ function sortReasons(reasons: string[]) {
   return [...reasons].sort((a, b) => rankReason(a) - rankReason(b));
 }
 
-function Badge({ v }: { v: "GREEN" | "AMBER" | "RED" }) {
-  const bg = v === "GREEN" ? "#0f5132" : v === "AMBER" ? "#664d03" : "#842029";
+// --- UI helpers ---
+function decisionTheme(v: "GREEN" | "AMBER" | "RED") {
+  if (v === "GREEN") return { accent: "#16a34a", bg: "#052e16", soft: "rgba(22,163,74,0.10)" };
+  if (v === "AMBER") return { accent: "#f59e0b", bg: "#2b1d00", soft: "rgba(245,158,11,0.12)" };
+  return { accent: "#ef4444", bg: "#2b0b0e", soft: "rgba(239,68,68,0.12)" };
+}
+function Pill({ children, tone = "neutral" }: { children: React.ReactNode; tone?: "neutral" | "danger" | "warn" | "ok" }) {
+  const style =
+    tone === "danger"
+      ? { background: "rgba(239,68,68,0.12)", border: "1px solid rgba(239,68,68,0.30)", color: "#ef4444" }
+      : tone === "warn"
+      ? { background: "rgba(245,158,11,0.12)", border: "1px solid rgba(245,158,11,0.30)", color: "#f59e0b" }
+      : tone === "ok"
+      ? { background: "rgba(22,163,74,0.12)", border: "1px solid rgba(22,163,74,0.30)", color: "#16a34a" }
+      : { background: "rgba(148,163,184,0.10)", border: "1px solid rgba(148,163,184,0.25)", color: "#cbd5e1" };
+
   return (
-    <div
-      style={{
-        display: "inline-flex",
-        alignItems: "center",
-        gap: 10,
-        padding: "10px 14px",
-        borderRadius: 14,
-        background: bg,
-        color: "#fff",
-        fontWeight: 800,
-        letterSpacing: 0.5,
-        fontSize: 18,
-      }}
-    >
-      {v}
+    <span style={{ display: "inline-flex", alignItems: "center", gap: 6, padding: "5px 10px", borderRadius: 999, fontSize: 12, fontWeight: 700, ...style }}>
+      {children}
+    </span>
+  );
+}
+function Card({ title, children }: { title: string; children: React.ReactNode }) {
+  return (
+    <section className="card">
+      <div className="cardTitle">{title}</div>
+      {children}
+    </section>
+  );
+}
+function ProgressBar({ value, limit, accent }: { value: number; limit: number; accent: string }) {
+  const pct = clamp(Math.round((value / Math.max(1, limit)) * 100));
+  const warn = pct >= 80 && pct < 100;
+  const bad = pct >= 100;
+  const bar = bad ? "rgba(239,68,68,0.90)" : warn ? "rgba(245,158,11,0.90)" : accent;
+
+  return (
+    <div className="barWrap">
+      <div className="bar" style={{ width: `${pct}%`, background: bar }} />
     </div>
   );
 }
-
-function Meter({ label, value, limit }: { label: string; value: number; limit: number }) {
-  const pct = clamp(Math.round((value / Math.max(1, limit)) * 100));
-  return (
-    <div style={{ marginTop: 10 }}>
-      <div style={{ display: "flex", justifyContent: "space-between", fontSize: 12, opacity: 0.85 }}>
-        <span>{label}</span>
-        <span>
-          {value} kt / LIM {limit} kt ({pct}%)
-        </span>
-      </div>
-      <div style={{ height: 10, borderRadius: 999, background: "#e9ecef", overflow: "hidden" }}>
-        <div style={{ width: `${pct}%`, height: "100%", background: "#212529" }} />
-      </div>
-    </div>
-  );
+function TAFTag({ type }: { type: string }) {
+  const t = type.toUpperCase();
+  const tone =
+    t === "TEMPO" ? "danger" :
+    t.startsWith("PROB") ? "warn" :
+    (t === "FM" || t === "BECMG") ? "neutral" : "ok";
+  return <Pill tone={tone as any}>{type}</Pill>;
 }
 
 export default function Home() {
-  // 時刻（UTC＋空港ローカル）を秒更新
   const [nowMs, setNowMs] = useState<number>(() => Date.now());
   useEffect(() => {
     const id = setInterval(() => setNowMs(Date.now()), 1000);
@@ -135,11 +145,10 @@ export default function Home() {
   const airport = useMemo(() => airports.find((a) => a.icao === icao) ?? airports[0], [icao]);
   const runways = airport?.runways ?? [];
 
-  // ★表示用：UTCと空港現地時刻（DST自動）
   const utcNow = useMemo(() => fmtZoned(nowMs, "UTC"), [nowMs]);
   const aptLocalNow = useMemo(() => fmtZoned(nowMs, airport?.tz || "UTC"), [nowMs, airport?.tz]);
 
-  // RWY 推奨（風が取れていれば）
+  // RWY 推奨
   const recommendedRunways = useMemo(() => {
     if (!runways.length) return [];
     const wind = wx?.wind;
@@ -161,7 +170,6 @@ export default function Home() {
       const headUse = Math.max(0, headPeak ?? headSteady);
 
       const score = headUse * 10 - tailUse * 30 - crossUse * 2;
-
       return { r, score, headUse, tailUse, crossUse };
     });
 
@@ -227,6 +235,8 @@ export default function Home() {
   }
 
   const decision: "GREEN" | "AMBER" | "RED" = judge?.decision ?? "GREEN";
+  const theme = decisionTheme(decision);
+
   const pdfEmphasis = decision === "RED" || decision === "AMBER";
 
   async function openPdf() {
@@ -266,12 +276,40 @@ export default function Home() {
   const limTail = (judge?.limits?.maxTailwind ?? 10) as number;
   const limCross = (judge?.limits?.maxCrosswind ?? 35) as number;
 
+  const windText = wx?.wind
+    ? `${wx.wind.dir}° / ${wx.wind.spd}${wx.wind.gust ? `G${wx.wind.gust}` : ""} kt`
+    : "—";
+
   return (
-    <main style={{ padding: 18, fontFamily: "system-ui, -apple-system, Segoe UI, sans-serif" }}>
+    <main className="app">
+      <style jsx global>{`
+        :root {
+          color-scheme: dark;
+        }
+        body {
+          margin: 0;
+          background: radial-gradient(1200px 800px at 20% 0%, rgba(59,130,246,0.16), transparent 60%),
+                      radial-gradient(900px 700px at 80% 10%, rgba(16,185,129,0.14), transparent 55%),
+                      #05070c;
+          color: #e5e7eb;
+        }
+      `}</style>
+
+      {/* Mobile対応 */}
       <style jsx>{`
+        .app {
+          padding: 18px;
+          font-family: system-ui, -apple-system, Segoe UI, sans-serif;
+        }
+        .topbar {
+          display: flex;
+          align-items: flex-end;
+          justify-content: space-between;
+          gap: 12px;
+        }
         .grid {
           display: grid;
-          grid-template-columns: 320px 1fr 420px;
+          grid-template-columns: 340px 1fr 420px;
           gap: 14px;
           margin-top: 14px;
         }
@@ -289,75 +327,280 @@ export default function Home() {
           }
           .actions button {
             flex: 1;
-            min-width: 140px;
+            min-width: 160px;
           }
+        }
+        .brand {
+          display: flex;
+          flex-direction: column;
+          gap: 6px;
+        }
+        .title {
+          font-size: 20px;
+          font-weight: 900;
+          letter-spacing: 0.2px;
+        }
+        .subtitle {
+          font-size: 12px;
+          opacity: 0.7;
+        }
+        .timeRow {
+          margin-top: 10px;
+          display: flex;
+          gap: 10px;
+          flex-wrap: wrap;
+        }
+        .timeChip {
+          border: 1px solid rgba(148,163,184,0.18);
+          background: rgba(15,23,42,0.55);
+          border-radius: 16px;
+          padding: 10px 12px;
+          backdrop-filter: blur(8px);
+        }
+        .timeLabel {
+          font-size: 11px;
+          opacity: 0.7;
+        }
+        .timeValue {
+          font-size: 13px;
+          font-weight: 900;
+          margin-top: 2px;
+        }
+        .actions {
+          display: flex;
+          gap: 10px;
+        }
+        button {
+          cursor: pointer;
+        }
+        .btn {
+          padding: 11px 12px;
+          border-radius: 14px;
+          border: 1px solid rgba(148,163,184,0.20);
+          background: rgba(15,23,42,0.55);
+          color: #e5e7eb;
+          font-weight: 800;
+          backdrop-filter: blur(8px);
+        }
+        .btnPrimary {
+          border: 1px solid rgba(226,232,240,0.18);
+          background: linear-gradient(180deg, rgba(15,23,42,0.9), rgba(15,23,42,0.55));
+        }
+        .btnDanger {
+          border: 1px solid rgba(239,68,68,0.35);
+          background: linear-gradient(180deg, rgba(239,68,68,0.18), rgba(15,23,42,0.55));
+          box-shadow: 0 10px 30px rgba(239,68,68,0.20);
+        }
+        .btn:disabled {
+          opacity: 0.5;
+          cursor: not-allowed;
+        }
+        .card {
+          border: 1px solid rgba(148,163,184,0.18);
+          background: rgba(15,23,42,0.55);
+          border-radius: 18px;
+          padding: 14px;
+          backdrop-filter: blur(10px);
+        }
+        .cardTitle {
+          font-weight: 900;
+          margin-bottom: 10px;
+          letter-spacing: 0.2px;
+        }
+        .label {
+          font-size: 12px;
+          opacity: 0.75;
+          margin-top: 6px;
+        }
+        .input, select {
+          width: 100%;
+          margin-top: 6px;
+          padding: 10px 12px;
+          border-radius: 14px;
+          border: 1px solid rgba(148,163,184,0.22);
+          background: rgba(2,6,23,0.55);
+          color: #e5e7eb;
+          outline: none;
+        }
+        .candList {
+          display: grid;
+          gap: 6px;
+          max-height: 170px;
+          overflow: auto;
+          padding-bottom: 8px;
+          margin-top: 8px;
+        }
+        .candBtn {
+          text-align: left;
+          padding: 9px 10px;
+          border-radius: 14px;
+          border: 1px solid rgba(148,163,184,0.18);
+          background: rgba(2,6,23,0.35);
+          color: #e5e7eb;
+          font-weight: 800;
+        }
+        .candBtnActive {
+          border: 1px solid rgba(226,232,240,0.22);
+          background: rgba(148,163,184,0.12);
+        }
+        .row {
+          display: flex;
+          gap: 10px;
+          align-items: center;
+        }
+        .rowGrow {
+          flex: 1;
+        }
+        .miniBtn {
+          padding: 10px 10px;
+          border-radius: 14px;
+          border: 1px solid rgba(148,163,184,0.20);
+          background: rgba(2,6,23,0.35);
+          color: #e5e7eb;
+          font-weight: 900;
+        }
+        .kpiGrid {
+          margin-top: 12px;
+          display: grid;
+          grid-template-columns: 1fr 1fr;
+          gap: 12px;
+        }
+        .kpi {
+          border: 1px solid rgba(148,163,184,0.16);
+          background: rgba(2,6,23,0.35);
+          border-radius: 18px;
+          padding: 12px;
+        }
+        .kpiLabel { font-size: 11px; opacity: 0.72; }
+        .kpiValue { font-size: 18px; font-weight: 1000; margin-top: 4px; }
+        .kpiSub { font-size: 12px; opacity: 0.75; margin-top: 4px; }
+        .decisionCard {
+          border: 1px solid rgba(148,163,184,0.18);
+          background: linear-gradient(180deg, ${theme.soft}, rgba(15,23,42,0.55));
+          border-radius: 18px;
+          padding: 14px;
+          backdrop-filter: blur(10px);
+        }
+        .decisionHeader {
+          display: flex;
+          align-items: center;
+          justify-content: space-between;
+          gap: 10px;
+        }
+        .badge {
+          display: inline-flex;
+          align-items: center;
+          gap: 10px;
+          padding: 10px 14px;
+          border-radius: 16px;
+          background: rgba(2,6,23,0.45);
+          border: 1px solid rgba(148,163,184,0.18);
+          font-weight: 1000;
+          letter-spacing: 0.5px;
+          font-size: 18px;
+        }
+        .badgeDot {
+          width: 10px;
+          height: 10px;
+          border-radius: 999px;
+          background: ${theme.accent};
+          box-shadow: 0 0 0 6px rgba(255,255,255,0.02);
+        }
+        .whyBox {
+          margin-top: 12px;
+          border: 1px solid rgba(148,163,184,0.16);
+          background: rgba(2,6,23,0.35);
+          border-radius: 18px;
+          padding: 12px;
+        }
+        .whyItem {
+          font-size: 13px;
+          margin: 7px 0;
+          line-height: 1.35;
+        }
+        .barWrap {
+          height: 10px;
+          border-radius: 999px;
+          background: rgba(148,163,184,0.12);
+          overflow: hidden;
+          margin-top: 6px;
+        }
+        .bar {
+          height: 100%;
+          border-radius: 999px;
+        }
+        pre {
+          white-space: pre-wrap;
+          border: 1px solid rgba(148,163,184,0.16);
+          border-radius: 18px;
+          padding: 12px;
+          background: rgba(2,6,23,0.35);
+          margin: 0;
+        }
+        .tafList {
+          display: grid;
+          gap: 8px;
+          margin-top: 8px;
+        }
+        .tafItem {
+          border: 1px solid rgba(148,163,184,0.16);
+          background: rgba(2,6,23,0.35);
+          border-radius: 18px;
+          padding: 10px;
+        }
+        .tafTop {
+          display: flex;
+          align-items: center;
+          justify-content: space-between;
+          gap: 8px;
+          margin-bottom: 6px;
+        }
+        .muted {
+          opacity: 0.7;
+          font-size: 12px;
         }
       `}</style>
 
-      <div className="topbar" style={{ display: "flex", alignItems: "baseline", justifyContent: "space-between", gap: 12 }}>
-        <div>
-          <div style={{ fontSize: 20, fontWeight: 800 }}>ARI Safety Intelligence</div>
-          <div style={{ fontSize: 12, opacity: 0.7 }}>Inputs → Decision → Evidence (Dispatch-style)</div>
+      {/* Top bar */}
+      <div className="topbar">
+        <div className="brand">
+          <div className="title">ARI Safety Intelligence</div>
+          <div className="subtitle">Dispatch board UI — fast inputs, loud decision, clean evidence</div>
 
-          {/* ★ UTC / Airport Local Time（DST自動） */}
-          <div style={{ marginTop: 8, display: "flex", gap: 10, flexWrap: "wrap" }}>
-            <div style={{ border: "1px solid #e9ecef", borderRadius: 14, padding: "8px 10px", background: "#fff" }}>
-              <div style={{ fontSize: 11, opacity: 0.7 }}>UTC NOW</div>
-              <div style={{ fontSize: 13, fontWeight: 800 }}>{utcNow}</div>
+          <div className="timeRow">
+            <div className="timeChip">
+              <div className="timeLabel">UTC NOW</div>
+              <div className="timeValue">{utcNow}</div>
             </div>
-
-            <div style={{ border: "1px solid #e9ecef", borderRadius: 14, padding: "8px 10px", background: "#fff" }}>
-              <div style={{ fontSize: 11, opacity: 0.7 }}>
+            <div className="timeChip">
+              <div className="timeLabel">
                 {icao} LOCAL NOW ({airport?.tz || "UTC"})
               </div>
-              <div style={{ fontSize: 13, fontWeight: 800 }}>{aptLocalNow}</div>
+              <div className="timeValue">{aptLocalNow}</div>
             </div>
           </div>
         </div>
 
-        <div className="actions" style={{ display: "flex", gap: 10 }}>
-          <button
-            onClick={fetchWeather}
-            disabled={loading}
-            style={{ padding: "10px 12px", borderRadius: 12, border: "1px solid #ced4da", background: "#fff" }}
-          >
+        <div className="actions">
+          <button className="btn" onClick={fetchWeather} disabled={loading}>
             {loading ? "Loading..." : "Fetch WX"}
           </button>
-
-          <button
-            onClick={run}
-            style={{ padding: "10px 12px", borderRadius: 12, border: "1px solid #212529", background: "#212529", color: "#fff", fontWeight: 700 }}
-          >
+          <button className="btn btnPrimary" onClick={run}>
             Run Dispatch Check
           </button>
-
-          <button
-            onClick={openPdf}
-            disabled={!judge}
-            style={{
-              padding: "10px 12px",
-              borderRadius: 12,
-              border: pdfEmphasis ? "1px solid #842029" : "1px solid #ced4da",
-              background: pdfEmphasis ? "#842029" : "#fff",
-              color: pdfEmphasis ? "#fff" : "#212529",
-              fontWeight: pdfEmphasis ? 800 : 600,
-              boxShadow: pdfEmphasis ? "0 8px 20px rgba(132,32,41,0.25)" : "none",
-            }}
-            title={pdfEmphasis ? "Recommended to export (AMBER/RED)" : "Export PDF"}
-          >
+          <button className={`btn ${pdfEmphasis ? "btnDanger" : ""}`} onClick={openPdf} disabled={!judge} title={pdfEmphasis ? "Recommended to export (AMBER/RED)" : "Export PDF"}>
             PDF Release
           </button>
         </div>
       </div>
 
       <div className="grid">
-        {/* LEFT: Inputs */}
-        <section style={{ border: "1px solid #dee2e6", borderRadius: 16, padding: 14, background: "#fff" }}>
-          <div style={{ fontWeight: 800, marginBottom: 10 }}>Inputs</div>
-
-          <label style={{ display: "block", fontSize: 12, opacity: 0.75 }}>Airport (ICAO)</label>
+        {/* Inputs */}
+        <Card title="Inputs">
+          <div className="label">Airport (ICAO)</div>
           <input
             ref={icaoInputRef}
+            className="input"
             value={icaoQuery}
             onChange={(e) => setIcaoQuery(e.target.value.toUpperCase())}
             onBlur={() => commitIcao(icaoQuery)}
@@ -373,25 +616,16 @@ export default function Home() {
               }
             }}
             placeholder="Type ICAO (e.g. RJTT)"
-            style={{ width: "100%", padding: 10, borderRadius: 12, border: "1px solid #ced4da", margin: "6px 0 8px" }}
           />
 
-          <div style={{ display: "grid", gap: 6, maxHeight: 170, overflow: "auto", paddingBottom: 8 }}>
+          <div className="candList">
             {airportCandidates.map((code) => (
               <button
                 key={code}
+                className={`candBtn ${code === icao ? "candBtnActive" : ""}`}
                 onClick={() => {
                   commitIcao(code);
                   icaoInputRef.current?.blur();
-                }}
-                style={{
-                  textAlign: "left",
-                  padding: "8px 10px",
-                  borderRadius: 12,
-                  border: code === icao ? "1px solid #212529" : "1px solid #e9ecef",
-                  background: code === icao ? "#f8f9fa" : "#fff",
-                  cursor: "pointer",
-                  fontWeight: code === icao ? 800 : 600,
                 }}
               >
                 {code}
@@ -399,9 +633,9 @@ export default function Home() {
             ))}
           </div>
 
-          <label style={{ display: "block", fontSize: 12, opacity: 0.75, marginTop: 6 }}>Runway</label>
-          <div style={{ display: "flex", gap: 8, margin: "6px 0 12px" }}>
-            <select value={rwyId} onChange={(e) => setRwyId(e.target.value)} style={{ flex: 1, padding: 10, borderRadius: 12, border: "1px solid #ced4da" }}>
+          <div className="label">Runway (recommended order)</div>
+          <div className="row" style={{ marginTop: 6 }}>
+            <select className="rowGrow" value={rwyId} onChange={(e) => setRwyId(e.target.value)}>
               {recommendedRunways.map((x, idx) => (
                 <option key={x.r.id} value={x.r.id}>
                   {idx === 0 ? "★ " : ""}
@@ -409,105 +643,124 @@ export default function Home() {
                 </option>
               ))}
             </select>
-
-            <button onClick={setBestRwy} style={{ padding: "10px 10px", borderRadius: 12, border: "1px solid #ced4da", background: "#fff" }} title="Select recommended runway">
+            <button className="miniBtn" onClick={setBestRwy} title="Select top recommendation">
               Best
             </button>
           </div>
 
-          <label style={{ display: "block", fontSize: 12, opacity: 0.75 }}>Runway Surface</label>
-          <select value={surface} onChange={(e) => setSurface(e.target.value as RwySurface)} style={{ width: "100%", padding: 10, borderRadius: 12, border: "1px solid #ced4da", margin: "6px 0 12px" }}>
+          <div className="label">Runway Surface</div>
+          <select value={surface} onChange={(e) => setSurface(e.target.value as RwySurface)}>
             <option value="DRY">DRY</option>
             <option value="WET">WET</option>
             <option value="CONTAM">CONTAM</option>
           </select>
 
-          <label style={{ display: "block", fontSize: 12, opacity: 0.75 }}>Approach Category</label>
-          <select value={approachCat} onChange={(e) => setApproachCat(e.target.value as ApproachCat)} style={{ width: "100%", padding: 10, borderRadius: 12, border: "1px solid #ced4da", margin: "6px 0 12px" }}>
+          <div className="label">Approach Category</div>
+          <select value={approachCat} onChange={(e) => setApproachCat(e.target.value as ApproachCat)}>
             <option value="CATI">CAT I</option>
             <option value="CATII">CAT II</option>
             <option value="CATIII">CAT III</option>
           </select>
 
-          <label style={{ display: "flex", alignItems: "center", gap: 10, marginTop: 6 }}>
-            <input type="checkbox" checked={autoland} onChange={(e) => setAutoland(e.target.checked)} />
-            <span style={{ fontSize: 13, fontWeight: 700 }}>Autoland</span>
-          </label>
+          <div className="row" style={{ marginTop: 10, justifyContent: "space-between" }}>
+            <label className="row" style={{ gap: 10 }}>
+              <input type="checkbox" checked={autoland} onChange={(e) => setAutoland(e.target.checked)} />
+              <span style={{ fontSize: 13, fontWeight: 900 }}>Autoland</span>
+            </label>
 
-          <div style={{ marginTop: 12, fontSize: 12, opacity: 0.75 }}>
-            AMBER = Limit高接近 / 予報リスク（PROB等）<br />
-            RED = Limit超過 / TEMPO TS/CB など
-          </div>
-        </section>
-
-        {/* CENTER: Decision */}
-        <section style={{ border: "1px solid #dee2e6", borderRadius: 16, padding: 14, background: "#fff" }}>
-          <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 10 }}>
-            <div style={{ fontWeight: 800 }}>Decision</div>
-            <Badge v={judge?.decision ?? "GREEN"} />
+            <Pill tone={surface === "DRY" ? "ok" : surface === "WET" ? "warn" : "danger"}>
+              {surface}
+            </Pill>
           </div>
 
-          <div style={{ marginTop: 12, display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12 }}>
-            <div style={{ border: "1px solid #e9ecef", borderRadius: 14, padding: 12 }}>
-              <div style={{ fontSize: 12, opacity: 0.7 }}>Selected RWY</div>
-              <div style={{ fontSize: 18, fontWeight: 800 }}>{selectedRwy ? `${icao} RWY ${selectedRwy.id}` : "—"}</div>
-              <div style={{ fontSize: 12, opacity: 0.7 }}>MAG {selectedRwy?.mag ?? "—"}</div>
-            </div>
+          <div style={{ marginTop: 12 }} className="muted">
+            AMBER = limit close / forecast risk (PROB, trend)<br />
+            RED = limit exceed / TEMPO TS/CB
+          </div>
+        </Card>
 
-            <div style={{ border: "1px solid #e9ecef", borderRadius: 14, padding: 12 }}>
-              <div style={{ fontSize: 12, opacity: 0.7 }}>Wind</div>
-              <div style={{ fontSize: 18, fontWeight: 800 }}>
-                {wx?.wind ? `${wx.wind.dir}° / ${wx.wind.spd}${wx.wind.gust ? `G${wx.wind.gust}` : ""} kt` : "—"}
-              </div>
-              <div style={{ fontSize: 12, opacity: 0.7 }}>
-                Surface {surface} / {approachCat} / {autoland ? "Autoland" : "Manual"}
-              </div>
+        {/* Decision */}
+        <section className="decisionCard">
+          <div className="decisionHeader">
+            <div style={{ fontWeight: 1000, letterSpacing: 0.2 }}>Decision</div>
+            <div className="badge">
+              <span className="badgeDot" />
+              {decision}
             </div>
           </div>
 
-          <div style={{ marginTop: 12, border: "1px solid #e9ecef", borderRadius: 14, padding: 12 }}>
-            <div style={{ fontWeight: 800, marginBottom: 6 }}>Why</div>
+          <div className="kpiGrid">
+            <div className="kpi">
+              <div className="kpiLabel">Selected</div>
+              <div className="kpiValue">{selectedRwy ? `${icao} RWY ${selectedRwy.id}` : "—"}</div>
+              <div className="kpiSub">MAG {selectedRwy?.mag ?? "—"}</div>
+            </div>
+            <div className="kpi">
+              <div className="kpiLabel">Wind</div>
+              <div className="kpiValue">{windText}</div>
+              <div className="kpiSub">
+                {approachCat} / {autoland ? "Autoland" : "Manual"}
+              </div>
+            </div>
+          </div>
+
+          <div className="whyBox">
+            <div style={{ fontWeight: 1000, marginBottom: 6 }}>Why (top reasons)</div>
+
             {reasons.slice(0, 4).map((r, i) => (
-              <div key={i} style={{ fontSize: 13, margin: "6px 0" }}>
+              <div className="whyItem" key={i}>
                 • {r}
               </div>
             ))}
-            {!reasons.length && <div style={{ opacity: 0.7 }}>—</div>}
+            {!reasons.length && <div className="muted">—</div>}
 
-            <Meter label="Tailwind (use peak if exists)" value={tailUse} limit={limTail} />
-            <Meter label="Crosswind (use peak if exists)" value={crossUse} limit={limCross} />
+            <div style={{ marginTop: 12 }}>
+              <div className="muted">Tailwind (peak if exists)</div>
+              <div style={{ display: "flex", alignItems: "baseline", justifyContent: "space-between", marginTop: 6 }}>
+                <div style={{ fontSize: 16, fontWeight: 1000 }}>{tailUse} kt</div>
+                <div className="muted">LIM {limTail} kt</div>
+              </div>
+              <ProgressBar value={tailUse} limit={limTail} accent={theme.accent} />
+            </div>
+
+            <div style={{ marginTop: 12 }}>
+              <div className="muted">Crosswind (peak if exists)</div>
+              <div style={{ display: "flex", alignItems: "baseline", justifyContent: "space-between", marginTop: 6 }}>
+                <div style={{ fontSize: 16, fontWeight: 1000 }}>{crossUse} kt</div>
+                <div className="muted">LIM {limCross} kt</div>
+              </div>
+              <ProgressBar value={crossUse} limit={limCross} accent={theme.accent} />
+            </div>
           </div>
         </section>
 
-        {/* RIGHT: Evidence */}
-        <section style={{ border: "1px solid #dee2e6", borderRadius: 16, padding: 14, background: "#fff" }}>
-          <div style={{ fontWeight: 800, marginBottom: 10 }}>Evidence</div>
+        {/* Evidence */}
+        <Card title="Evidence">
+          <div className="muted">METAR</div>
+          <pre style={{ marginTop: 8 }}>{wx?.metar ?? "—"}</pre>
 
-          <div style={{ fontSize: 12, opacity: 0.7, marginBottom: 6 }}>METAR</div>
-          <pre style={{ whiteSpace: "pre-wrap", border: "1px solid #e9ecef", borderRadius: 14, padding: 12, marginTop: 0 }}>
-            {wx?.metar ?? "—"}
-          </pre>
+          <div className="muted" style={{ marginTop: 12 }}>
+            TAF (blocks)
+          </div>
 
-          <div style={{ fontSize: 12, opacity: 0.7, margin: "10px 0 6px" }}>TAF (blocks)</div>
-          <div style={{ display: "grid", gap: 8 }}>
+          <div className="tafList">
             {(judge?.tafRisk?.blocks ?? []).map((b: any, idx: number) => (
-              <div key={idx} style={{ border: "1px solid #e9ecef", borderRadius: 14, padding: 10 }}>
-                <div style={{ fontSize: 12, fontWeight: 800, opacity: 0.8 }}>{b.type}</div>
-                <div style={{ fontSize: 13, whiteSpace: "pre-wrap" }}>{b.text}</div>
+              <div className="tafItem" key={idx}>
+                <div className="tafTop">
+                  <TAFTag type={b.type} />
+                  <span className="muted">priority {rankReason(b.text ?? b.type)}</span>
+                </div>
+                <div style={{ fontSize: 13, lineHeight: 1.35 }}>{b.text}</div>
               </div>
             ))}
-            {!judge?.tafRisk?.blocks?.length && (
-              <div style={{ border: "1px solid #e9ecef", borderRadius: 14, padding: 10, opacity: 0.7 }}>
-                — (Run Dispatch Check で表示)
-              </div>
-            )}
+            {!judge?.tafRisk?.blocks?.length && <div className="tafItem muted">— (Run Dispatch Check で表示)</div>}
           </div>
 
-          <div style={{ fontSize: 12, opacity: 0.7, margin: "12px 0 6px" }}>Limits used</div>
-          <pre style={{ whiteSpace: "pre-wrap", border: "1px solid #e9ecef", borderRadius: 14, padding: 12, marginTop: 0 }}>
-            {judge ? JSON.stringify(judge.limits, null, 2) : "—"}
-          </pre>
-        </section>
+          <div className="muted" style={{ marginTop: 12 }}>
+            Limits used
+          </div>
+          <pre style={{ marginTop: 8 }}>{judge ? JSON.stringify(judge.limits, null, 2) : "—"}</pre>
+        </Card>
       </div>
     </main>
   );
