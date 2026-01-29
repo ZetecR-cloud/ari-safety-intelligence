@@ -1,210 +1,136 @@
-// app/page.tsx
 "use client";
 
-import { useMemo, useState } from "react";
-import { AIRPORTS, type Airport } from "./airports";
+import React, { useEffect, useMemo, useRef, useState } from "react";
+import { AIRPORTS } from "./airports";
 
-type ApiResp = any;
+type WxApiResponse = {
+  status: string;
+  icao: string;
+  sources?: string[];
+  metar?: {
+    raw?: string | null;
+    wind?: string | null;
+    visibility?: string | null;
+    qnh?: string | null;
+    clouds?: string[] | null;
+  };
+  taf?: string | null;
+  wx_analysis?: { level?: string; reasons?: string[] };
+  time?: string;
+  raw?: any; // 互換用（以前のレスポンスが混在しても落ちない）
+};
 
-export default function Home() {
-  const [q, setQ] = useState("RJTT");
-  const [picked, setPicked] = useState<Airport | null>(null);
-  const [loading, setLoading] = useState(false);
-  const [data, setData] = useState<ApiResp | null>(null);
-  const [err, setErr] = useState<string | null>(null);
+type Wind = {
+  dirDeg: number | null; // null=VRB
+  speedKt: number | null;
+  gustKt: number | null;
+  raw: string | null;
+};
 
-  const query = q.trim().toUpperCase();
+type RunwayItem = {
+  id: string; // "34L"など
+  headingDeg: number; // 340など
+};
 
-  const suggestions = useMemo(() => {
-    if (!query) return [];
-    const s = AIRPORTS.filter((a) => {
-      const hay = `${a.icao} ${a.iata ?? ""} ${a.name} ${a.city}`.toUpperCase();
-      return hay.includes(query);
-    }).slice(0, 10);
-    return s;
-  }, [query]);
-
-  function pick(a: Airport) {
-    setPicked(a);
-    setQ(a.icao);
-    setData(null);
-    setErr(null);
-  }
-
-  async function run() {
-    setLoading(true);
-    setErr(null);
-    setData(null);
-
-    const icao = (picked?.icao ?? query).toUpperCase();
-
-    try {
-      const res = await fetch(`/api/weather?icao=${encodeURIComponent(icao)}`);
-      const json = await res.json().catch(() => ({}));
-      if (!res.ok) throw new Error(json?.error || json?.detail || `HTTP ${res.status}`);
-      setData(json);
-    } catch (e: any) {
-      setErr(String(e?.message ?? e));
-    } finally {
-      setLoading(false);
-    }
-  }
-
-  const level = data?.wx_analysis?.level as string | undefined;
-
-  return (
-    <main style={{ padding: 24, fontFamily: "system-ui, sans-serif" }}>
-      <h1 style={{ margin: 0 }}>ARI Safety Intelligence</h1>
-      <p style={{ marginTop: 6, opacity: 0.8 }}>
-        ICAO入力 → METAR/TAF取得 → WX解析（注意喚起レベル）
-      </p>
-
-      <div style={{ display: "flex", gap: 12, alignItems: "center", marginTop: 16 }}>
-        <div style={{ position: "relative", width: 360, maxWidth: "90vw" }}>
-          <label style={{ display: "block", fontSize: 12, opacity: 0.8 }}>ICAO / IATA / Name</label>
-          <input
-            value={q}
-            onChange={(e) => {
-              setQ(e.target.value);
-              setPicked(null);
-            }}
-            placeholder="e.g. RJTT, RJAA, HND, NRT"
-            style={{
-              width: "100%",
-              padding: "10px 12px",
-              fontSize: 16,
-              borderRadius: 10,
-              border: "1px solid #333",
-              background: "#111",
-              color: "#fff",
-              outline: "none",
-            }}
-          />
-
-          {suggestions.length > 0 && (
-            <div
-              style={{
-                position: "absolute",
-                top: 68,
-                left: 0,
-                right: 0,
-                border: "1px solid #333",
-                borderRadius: 10,
-                background: "#0b0b0b",
-                overflow: "hidden",
-                zIndex: 10,
-              }}
-            >
-              {suggestions.map((a) => (
-                <button
-                  key={a.icao}
-                  onClick={() => pick(a)}
-                  style={{
-                    width: "100%",
-                    textAlign: "left",
-                    padding: "10px 12px",
-                    background: "transparent",
-                    color: "#fff",
-                    border: "none",
-                    cursor: "pointer",
-                    borderBottom: "1px solid #222",
-                  }}
-                >
-                  <div style={{ fontWeight: 600 }}>
-                    {a.icao} {a.iata ? `(${a.iata})` : ""} — {a.name}
-                  </div>
-                  <div style={{ fontSize: 12, opacity: 0.7 }}>{a.city}</div>
-                </button>
-              ))}
-            </div>
-          )}
-        </div>
-
-        <button
-          onClick={run}
-          disabled={loading}
-          style={{
-            padding: "10px 14px",
-            borderRadius: 10,
-            border: "1px solid #333",
-            background: loading ? "#222" : "#1a1a1a",
-            color: "#fff",
-            cursor: loading ? "not-allowed" : "pointer",
-            height: 44,
-            marginTop: 18,
-          }}
-        >
-          {loading ? "Fetching..." : "Get Weather"}
-        </button>
-      </div>
-
-      {picked && (
-        <p style={{ marginTop: 10, opacity: 0.9 }}>
-          Selected: <b>{picked.icao}</b> {picked.iata ? `(${picked.iata})` : ""} — {picked.name}
-        </p>
-      )}
-
-      {err && (
-        <div style={{ marginTop: 18, padding: 14, border: "1px solid #661", borderRadius: 12 }}>
-          <b style={{ color: "#ffcc66" }}>Error:</b> {err}
-        </div>
-      )}
-
-      {data && (
-        <div style={{ marginTop: 18 }}>
-          <div
-            style={{
-              padding: 14,
-              borderRadius: 12,
-              border: "1px solid #333",
-              background: "#0f0f0f",
-              marginBottom: 12,
-            }}
-          >
-            <div style={{ display: "flex", justifyContent: "space-between", gap: 10, flexWrap: "wrap" }}>
-              <div>
-                <div style={{ fontSize: 12, opacity: 0.7 }}>ICAO</div>
-                <div style={{ fontSize: 18, fontWeight: 700 }}>{data.icao}</div>
-              </div>
-
-              <div>
-                <div style={{ fontSize: 12, opacity: 0.7 }}>WX Level</div>
-                <div style={{ fontSize: 18, fontWeight: 700 }}>
-                  {level ?? "N/A"}
-                </div>
-              </div>
-
-              <div>
-                <div style={{ fontSize: 12, opacity: 0.7 }}>Reasons</div>
-                <div style={{ fontSize: 14 }}>
-                  {(data?.wx_analysis?.reasons ?? []).length
-                    ? (data.wx_analysis.reasons as string[]).join(" / ")
-                    : "—"}
-                </div>
-              </div>
-            </div>
-          </div>
-
-          <pre
-            style={{
-              whiteSpace: "pre-wrap",
-              wordBreak: "break-word",
-              padding: 14,
-              borderRadius: 12,
-              border: "1px solid #333",
-              background: "#0b0b0b",
-              color: "#d6ffd6",
-              fontSize: 13,
-            }}
-          >
-            {JSON.stringify(data, null, 2)}
-          </pre>
-        </div>
-      )}
-
-      <p style={{ marginTop: 18, opacity: 0.6, fontSize: 12 }}>
-        ※ “WX Level” は汎用の注意喚起（デモ）。運航可否判断そのものではありません。
-      </p>
-    </main>
-  );
+function clamp(n: number, min: number, max: number) {
+  return Math.max(min, Math.min(max, n));
 }
+
+function parseWindFromMetarRaw(metarRaw: string | null | undefined): Wind {
+  if (!metarRaw) return { dirDeg: null, speedKt: null, gustKt: null, raw: null };
+  // 例: 03009KT / 34010G20KT / VRB03KT
+  const m = metarRaw.match(/\b(\d{3}|VRB)(\d{2,3})(G(\d{2,3}))?KT\b/);
+  if (!m) return { dirDeg: null, speedKt: null, gustKt: null, raw: null };
+  const dirToken = m[1];
+  const spd = Number(m[2]);
+  const gust = m[4] ? Number(m[4]) : null;
+  return {
+    dirDeg: dirToken === "VRB" ? null : Number(dirToken),
+    speedKt: Number.isFinite(spd) ? spd : null,
+    gustKt: gust,
+    raw: m[0] ?? null,
+  };
+}
+
+function angleDiffDeg(a: number, b: number) {
+  // smallest difference 0..180
+  const d = Math.abs(a - b) % 360;
+  return d > 180 ? 360 - d : d;
+}
+
+function computeWindComponents(
+  windDirDeg: number,
+  windKt: number,
+  runwayHeadingDeg: number
+) {
+  const diff = angleDiffDeg(windDirDeg, runwayHeadingDeg);
+  const rad = (diff * Math.PI) / 180;
+  const head = windKt * Math.cos(rad); // + = headwind, - = tailwind
+  const cross = windKt * Math.sin(rad);
+  return { diffDeg: diff, headKt: head, crossKt: cross };
+}
+
+function parseTafSignals(tafRaw: string | null | undefined) {
+  const t = tafRaw ?? "";
+  const hasTEMPO = /\bTEMPO\b/.test(t);
+  const hasBECMG = /\bBECMG\b/.test(t);
+  const hasPROB = /\bPROB(30|40)\b/.test(t);
+
+  // TS / CB / SHRAなど（簡易）
+  const hasTS = /\bTS\b|\bTSRA\b|\bVCTS\b/.test(t);
+  const hasCB = /\bCB\b/.test(t);
+  const hasSHRA = /\bSHRA\b|\bRA\b/.test(t);
+
+  // 風ガスト/強風の兆候（簡易）
+  const hasGust = /\bG\d{2,3}KT\b/.test(t);
+  const strongWind = /\b(\d{3}|VRB)\d{2,3}KT\b/.test(t) && /\b(\d{3})\d{2,3}KT\b/.test(t);
+
+  return {
+    hasTEMPO,
+    hasBECMG,
+    hasPROB,
+    hasTS,
+    hasCB,
+    hasSHRA,
+    hasGust,
+    strongWind,
+  };
+}
+
+type Decision = {
+  color: "GREEN" | "AMBER" | "RED";
+  reasons: string[];
+};
+
+function decisionFrom(
+  crossKt: number | null,
+  tailKt: number | null,
+  limitCross: number,
+  limitTail: number,
+  taf: ReturnType<typeof parseTafSignals>,
+  tempoRiskPolicy: "AMBER" | "RED"
+): Decision {
+  const reasons: string[] = [];
+
+  let color: Decision["color"] = "GREEN";
+
+  if (crossKt != null && crossKt > limitCross) {
+    color = "RED";
+    reasons.push(`Crosswind ${crossKt.toFixed(1)}kt > Limit ${limitCross}kt`);
+  }
+  if (tailKt != null && tailKt > limitTail) {
+    color = "RED";
+    reasons.push(`Tailwind ${tailKt.toFixed(1)}kt > Limit ${limitTail}kt`);
+  }
+
+  // TAFのリスクを加点
+  if (taf.hasTS) {
+    color = color === "RED" ? "RED" : "AMBER";
+    reasons.push("TAF: Thunderstorm (TS) risk");
+  }
+  if (taf.hasCB) {
+    color = color === "RED" ? "RED" : "AMBER";
+    reasons.push("TAF: CB present risk");
+  }
+
+  // TE
