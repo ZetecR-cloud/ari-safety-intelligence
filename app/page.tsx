@@ -95,7 +95,7 @@ function Pill({
         padding: "5px 10px",
         borderRadius: 999,
         fontSize: 12,
-        fontWeight: 800,
+        fontWeight: 850,
         ...style,
       }}
     >
@@ -135,24 +135,26 @@ function TAFTag({ type }: { type: string }) {
   return <Pill tone={tone as any}>{type}</Pill>;
 }
 
-/** ② 理由ハイライト（重要語句を太字＆色で強調） */
-function highlightReason(text: string) {
+/** ハイライト（理由＆TAF本文の共通） */
+function highlightText(text: string) {
   const re =
-    /(TEMPO|PROB30|PROB40|PROB|FM|BECMG|TSRA|TS|CB|TAILWIND|CROSSWIND|LIM|LIMIT|HIGH|EXCEED|>|≤|>=|<=|\d+|\bKT\b)/gi;
+    /(TEMPO|PROB30|PROB40|PROB|FM|BECMG|TSRA|TS|CB|SHRA|RA|BR|FG|HZ|SQ|G\d+|VRB|\bKT\b|TAILWIND|CROSSWIND|LIM|LIMIT|HIGH|EXCEED|>|≤|>=|<=|\d+)/gi;
 
   const parts = text.split(re);
   return parts.map((p, i) => {
     if (!p) return null;
     const u = p.toUpperCase();
 
-    const isDanger = ["TEMPO", "TS", "TSRA", "CB", "EXCEED", ">"].includes(u);
+    const isDanger = ["TEMPO", "TS", "TSRA", "CB", "SQ", "EXCEED", ">"].includes(u);
     const isWarn = ["PROB", "PROB30", "PROB40", "HIGH"].includes(u);
-    const isInfo = ["FM", "BECMG", "TAILWIND", "CROSSWIND", "LIM", "LIMIT", "KT", "<=", ">=", "≤"].includes(u);
+    const isInfo = ["FM", "BECMG", "SHRA", "RA", "BR", "FG", "HZ", "VRB", "TAILWIND", "CROSSWIND", "LIM", "LIMIT", "KT", "<=", ">=", "≤"].includes(u);
+    const isGust = /^G\d+$/.test(u);
     const isNumber = /^\d+$/.test(u);
 
-    if (isDanger || isWarn || isInfo || isNumber) {
+    if (isDanger || isWarn || isInfo || isGust || isNumber) {
       const color = isDanger ? "#ef4444" : isWarn ? "#f59e0b" : "#e5e7eb";
       const bg = isDanger ? "rgba(239,68,68,0.10)" : isWarn ? "rgba(245,158,11,0.10)" : "rgba(148,163,184,0.08)";
+      const border = isDanger ? "rgba(239,68,68,0.22)" : isWarn ? "rgba(245,158,11,0.22)" : "rgba(148,163,184,0.14)";
       return (
         <strong
           key={i}
@@ -161,8 +163,9 @@ function highlightReason(text: string) {
             background: bg,
             padding: "1px 6px",
             borderRadius: 10,
-            border: "1px solid rgba(148,163,184,0.12)",
+            border: `1px solid ${border}`,
             fontWeight: 1000,
+            whiteSpace: "nowrap",
           }}
         >
           {p}
@@ -209,7 +212,7 @@ export default function Home() {
   const utcNow = useMemo(() => fmtZoned(nowMs, "UTC"), [nowMs]);
   const aptLocalNow = useMemo(() => fmtZoned(nowMs, airport?.tz || "UTC"), [nowMs, airport?.tz]);
 
-  // RWY 推奨（風が無い場合も並ぶが、風があると“意味のある順”になる）
+  // RWY 推奨
   const recommendedRunways = useMemo(() => {
     if (!runways.length) return [];
     const wind = wx?.wind;
@@ -290,10 +293,7 @@ export default function Home() {
     return out;
   }
 
-  // ✅ ① 自動再判定（入力変更で勝手に更新）
-  // - ICAO変更: WXを取り直して再判定
-  // - RWY/Surface/CAT/Autoland変更: 手元のWXで即再判定
-  // - 連続操作で暴れないように軽いデバウンス（250ms）
+  // ✅ 自動再判定
   const autoTimer = useRef<any>(null);
   const lastFetchIcao = useRef<string>("");
 
@@ -301,7 +301,6 @@ export default function Home() {
     if (autoTimer.current) clearTimeout(autoTimer.current);
 
     autoTimer.current = setTimeout(async () => {
-      // 1) ICAOが変わった直後はWX再取得（同一ICAOでの二重fetch防止）
       if (icao && lastFetchIcao.current !== icao) {
         lastFetchIcao.current = icao;
         const data = await fetchWeather(icao);
@@ -310,7 +309,6 @@ export default function Home() {
         return;
       }
 
-      // 2) ICAO同じなら、今あるWXで再判定
       if (wx) {
         const out = computeJudge(wx);
         if (out) setJudge(out);
@@ -331,6 +329,19 @@ export default function Home() {
   const decision: "GREEN" | "AMBER" | "RED" = judge?.decision ?? "GREEN";
   const theme = decisionTheme(decision);
   const pdfEmphasis = decision === "RED" || decision === "AMBER";
+
+  // ✅ (A) RED/AMBERになった瞬間に “Why” にスクロール
+  const prevDecisionRef = useRef<"GREEN" | "AMBER" | "RED">("GREEN");
+  const whyRef = useRef<HTMLDivElement | null>(null);
+
+  useEffect(() => {
+    const prev = prevDecisionRef.current;
+    if ((decision === "RED" || decision === "AMBER") && prev !== decision) {
+      // 見落とし防止：Decision変化時にWhyへジャンプ
+      whyRef.current?.scrollIntoView({ behavior: "smooth", block: "start" });
+    }
+    prevDecisionRef.current = decision;
+  }, [decision]);
 
   async function openPdf() {
     if (!judge || !wx || !selectedRwy) return;
@@ -510,7 +521,7 @@ export default function Home() {
       <div className="topbar">
         <div className="brand">
           <div className="title">ARI Safety Intelligence</div>
-          <div className="subtitle">Auto re-check on input change + highlighted reasons</div>
+          <div className="subtitle">Auto scroll on AMBER/RED + Highlighted TAF content</div>
 
           <div className="timeRow">
             <div className="timeChip">
@@ -530,7 +541,6 @@ export default function Home() {
           <button className="btn" onClick={() => fetchWeather(icao)} disabled={loading}>
             {loading ? "Loading..." : "Fetch WX"}
           </button>
-          {/* 自動再判定が主役なので、手動ボタンは “保険” として残す */}
           <button
             className="btn btnPrimary"
             onClick={async () => {
@@ -542,12 +552,7 @@ export default function Home() {
           >
             Re-check Now
           </button>
-          <button
-            className={`btn ${pdfEmphasis ? "btnDanger" : ""}`}
-            onClick={openPdf}
-            disabled={!judge}
-            title={pdfEmphasis ? "Recommended to export (AMBER/RED)" : "Export PDF"}
-          >
+          <button className={`btn ${pdfEmphasis ? "btnDanger" : ""}`} onClick={openPdf} disabled={!judge}>
             PDF Release
           </button>
         </div>
@@ -602,9 +607,7 @@ export default function Home() {
                 </option>
               ))}
             </select>
-            <button className="miniBtn" onClick={setBestRwy} title="Select top recommendation">
-              Best
-            </button>
+            <button className="miniBtn" onClick={setBestRwy}>Best</button>
           </div>
 
           <div className="label">Runway Surface</div>
@@ -626,12 +629,11 @@ export default function Home() {
               <input type="checkbox" checked={autoland} onChange={(e) => setAutoland(e.target.checked)} />
               <span style={{ fontSize: 13, fontWeight: 950 }}>Autoland</span>
             </label>
-
             <Pill tone={surface === "DRY" ? "ok" : surface === "WET" ? "warn" : "danger"}>{surface}</Pill>
           </div>
 
           <div style={{ marginTop: 12 }} className="muted">
-            Auto re-check: ICAO / RWY / Surface / CAT / Autoland / WX update
+            Auto re-check + auto scroll on AMBER/RED
           </div>
         </Card>
 
@@ -654,19 +656,18 @@ export default function Home() {
             <div className="kpi">
               <div className="kpiLabel">Wind</div>
               <div className="kpiValue">{windText}</div>
-              <div className="kpiSub">
-                {approachCat} / {autoland ? "Autoland" : "Manual"}
-              </div>
+              <div className="kpiSub">{approachCat} / {autoland ? "Autoland" : "Manual"}</div>
             </div>
           </div>
 
+          {/* ✅ スクロール先アンカー */}
+          <div ref={whyRef} />
+
           <div className="whyBox">
             <div style={{ fontWeight: 1000, marginBottom: 6 }}>Why (top reasons)</div>
-
-            {/* ✅ ② ハイライト表示 */}
             {reasons.slice(0, 4).map((r, i) => (
               <div className="whyItem" key={i}>
-                • {highlightReason(r)}
+                • {highlightText(r)}
               </div>
             ))}
             {!reasons.length && <div className="muted">—</div>}
@@ -697,6 +698,8 @@ export default function Home() {
           <pre style={{ marginTop: 8 }}>{wx?.metar ?? "—"}</pre>
 
           <div className="muted" style={{ marginTop: 12 }}>TAF (blocks)</div>
+
+          {/* ✅ (B) TAF本文もハイライト */}
           <div className="tafList">
             {(judge?.tafRisk?.blocks ?? []).map((b: any, idx: number) => (
               <div className="tafItem" key={idx}>
@@ -704,7 +707,9 @@ export default function Home() {
                   <TAFTag type={b.type} />
                   <span className="muted">{b.type.toUpperCase() === "TEMPO" ? "highest attention" : ""}</span>
                 </div>
-                <div style={{ fontSize: 13, lineHeight: 1.55 }}>{b.text}</div>
+                <div style={{ fontSize: 13, lineHeight: 1.6 }}>
+                  {highlightText(String(b.text ?? ""))}
+                </div>
               </div>
             ))}
             {!judge?.tafRisk?.blocks?.length && <div className="tafItem muted">— (auto re-check after WX fetch)</div>}
