@@ -1,8 +1,18 @@
-export const runtime = "nodejs";
+export async function GET(request: Request) {
+  const { searchParams } = new URL(request.url);
+  const icao = searchParams.get("icao");
 
-export async function GET() {
+  if (!icao) {
+    return Response.json(
+      { error: "ICAO code is required" },
+      { status: 400 }
+    );
+  }
+
   return Response.json({
-    status: "API is alive",
+    status: "OK",
+    icao: icao.toUpperCase(),
+    message: "ICAO received successfully",
     time: new Date().toISOString()
   });
 }
