@@ -1,627 +1,750 @@
 "use client";
 
-import React, { useEffect, useMemo, useRef, useState } from "react";
-import { AIRPORTS } from "./airports";
+import React, { useEffect, useMemo, useState } from "react";
+import { AIRPORTS, type Airport, type Runway } from "./airports";
 
 type WxApiResponse = {
-  status: string;
-  icao: string;
-  sources?: string[];
-  metar?: {
-    raw?: string | null;
-    wind?: string | null;
-    visibility?: string | null;
-    qnh?: string | null;
-    clouds?: string[] | null;
+  status?: string;
+  icao?: string;
+  source?: string;
+  services?: {
+    metar?: string;
+    taf?: string;
+    aviationweather_gov?: string;
   };
-  taf?: string | null;
-  wx_analysis?: { level?: string; reasons?: string[] };
-  time?: string;
-  raw?: any; // 互換用（以前のレスポンスが混在しても落ちない）
+  metar?: { raw?: string; time?: number };
+  taf?: { raw?: string; time?: number; validFrom?: number; validTo?: number };
+  wind?: { dir?: number | null; spd?: number | null; gst?: number | null };
+  visibility?: { value?: number | null; unit?: string | null };
+  ceiling?: { value?: number | null; unit?: string | null };
+  temp?: { c?: number | null };
+  dewpoint?: { c?: number | null };
+  qnh_hpa?: number | null;
+  remarks?: string | null;
+  wx_analysis?: {
+    level?: "GREEN" | "AMBER" | "RED";
+    score?: number;
+    reasons?: string[];
+  };
+  issueTime?: string;
+  message?: string;
+  error?: string;
 };
 
-type Wind = {
-  dirDeg: number | null; // null=VRB
-  speedKt: number | null;
-  gustKt: number | null;
-  raw: string | null;
+type MetarWind = {
+  dirDeg: number | null; // steady direction
+  spdKt: number | null; // steady speed
+  gustKt: number | null; // gust speed (peak)
 };
 
-type RunwayItem = {
-  id: string; // "34L"など
-  headingDeg: number; // 340など
+type TafSignals = {
+  hasTSorCB: boolean;
+  tempoHasTSorCB: boolean;
+  hasTEMPO: boolean;
+  hasBECMG: boolean;
+  hasSHRA: boolean;
+  raw: string;
 };
 
-function clamp(n: number, min: number, max: number) {
-  return Math.max(min, Math.min(max, n));
-}
-
-function parseWindFromMetarRaw(metarRaw: string | null | undefined): Wind {
-  if (!metarRaw) return { dirDeg: null, speedKt: null, gustKt: null, raw: null };
-  // 例: 03009KT / 34010G20KT / VRB03KT
-  const m = metarRaw.match(/\b(\d{3}|VRB)(\d{2,3})(G(\d{2,3}))?KT\b/);
-  if (!m) return { dirDeg: null, speedKt: null, gustKt: null, raw: null };
-  const dirToken = m[1];
-  const spd = Number(m[2]);
-  const gust = m[4] ? Number(m[4]) : null;
-  return {
-    dirDeg: dirToken === "VRB" ? null : Number(dirToken),
-    speedKt: Number.isFinite(spd) ? spd : null,
-    gustKt: gust,
-    raw: m[0] ?? null,
+type RunwayComponent = {
+  runwayId: string;
+  magHdg: number;
+  steady: {
+    headwind: number;
+    crosswind: number;
+    tailwind: number;
+    from: "L" | "R" | "-";
   };
-}
-
-function angleDiffDeg(a: number, b: number) {
-  // smallest difference 0..180
-  const d = Math.abs(a - b) % 360;
-  return d > 180 ? 360 - d : d;
-}
-
-function computeWindComponents(
-  windDirDeg: number,
-  windKt: number,
-  runwayHeadingDeg: number
-) {
-  const diff = angleDiffDeg(windDirDeg, runwayHeadingDeg);
-  const rad = (diff * Math.PI) / 180;
-  const head = windKt * Math.cos(rad); // + = headwind, - = tailwind
-  const cross = windKt * Math.sin(rad);
-  return { diffDeg: diff, headKt: head, crossKt: cross };
-}
-
-function parseTafSignals(tafRaw: string | null | undefined) {
-  const t = tafRaw ?? "";
-  const hasTEMPO = /\bTEMPO\b/.test(t);
-  const hasBECMG = /\bBECMG\b/.test(t);
-  const hasPROB = /\bPROB(30|40)\b/.test(t);
-
-  // TS / CB / SHRAなど（簡易）
-  const hasTS = /\bTS\b|\bTSRA\b|\bVCTS\b/.test(t);
-  const hasCB = /\bCB\b/.test(t);
-  const hasSHRA = /\bSHRA\b|\bRA\b/.test(t);
-
-  // 風ガスト/強風の兆候（簡易）
-  const hasGust = /\bG\d{2,3}KT\b/.test(t);
-  const strongWind = /\b(\d{3}|VRB)\d{2,3}KT\b/.test(t) && /\b(\d{3})\d{2,3}KT\b/.test(t);
-
-  return {
-    hasTEMPO,
-    hasBECMG,
-    hasPROB,
-    hasTS,
-    hasCB,
-    hasSHRA,
-    hasGust,
-    strongWind,
+  gust: {
+    headwind: number;
+    crosswind: number;
+    tailwind: number;
+    from: "L" | "R" | "-";
   };
-}
+};
 
 type Decision = {
   color: "GREEN" | "AMBER" | "RED";
   reasons: string[];
 };
 
-function decisionFrom(
-  crossKt: number | null,
-  tailKt: number | null,
-  limitCross: number,
-  limitTail: number,
-  taf: ReturnType<typeof parseTafSignals>,
-  tempoRiskPolicy: "AMBER" | "RED"
-): Decision {
-  const reasons: string[] = [];
+function clamp360(n: number) {
+  let x = n % 360;
+  if (x < 0) x += 360;
+  return x;
+}
 
+function diffAngle(a: number, b: number) {
+  // smallest difference in degrees [0..180]
+  const d = Math.abs(clamp360(a) - clamp360(b));
+  return d > 180 ? 360 - d : d;
+}
+
+function calcComponents(windDir: number, windSpd: number, rwyHdg: number) {
+  // returns head/tail and cross components (kt)
+  // Relative angle: wind FROM direction relative to runway heading
+  const rel = clamp360(windDir - rwyHdg);
+  const rad = (rel * Math.PI) / 180;
+
+  const head = windSpd * Math.cos(rad); // + = headwind, - = tailwind
+  const cross = windSpd * Math.sin(rad); // + = from right, - = from left (given our rel def)
+  const headwind = Math.max(0, head);
+  const tailwind = Math.max(0, -head);
+  const crossAbs = Math.abs(cross);
+
+  const from: "L" | "R" | "-" = cross === 0 ? "-" : cross > 0 ? "R" : "L";
+  return { headwind, tailwind, crosswind: crossAbs, from };
+}
+
+function parseMetarWind(metarRaw: string): MetarWind {
+  // Minimal METAR wind parser: e.g. "34010KT", "VRB03KT", "18012G22KT"
+  // Returns nulls if not found.
+  const m = metarRaw.match(/\b(\d{3}|VRB)(\d{2,3})(G(\d{2,3}))?KT\b/);
+  if (!m) return { dirDeg: null, spdKt: null, gustKt: null };
+  const dir = m[1] === "VRB" ? null : Number(m[1]);
+  const spd = Number(m[2]);
+  const gst = m[4] ? Number(m[4]) : null;
+  return { dirDeg: Number.isFinite(dir as any) ? (dir as number) : null, spdKt: spd, gustKt: gst };
+}
+
+function parseTafSignals(tafRaw: string): TafSignals {
+  const t = (tafRaw || "").toUpperCase();
+  const hasTSorCB = /\b(TS|TSRA|VCTS|CB)\b/.test(t);
+  // Heuristic: if TS/CB appears within ~120 chars after TEMPO, treat as TEMPO convective
+  const tempoHasTSorCB = /\bTEMPO\b[\s\S]{0,120}\b(TS|TSRA|VCTS|CB)\b/.test(t);
+  const hasTEMPO = /\bTEMPO\b/.test(t);
+  const hasBECMG = /\bBECMG\b/.test(t);
+  const hasSHRA = /\bSHRA\b/.test(t);
+
+  return { hasTSorCB, tempoHasTSorCB, hasTEMPO, hasBECMG, hasSHRA, raw: tafRaw || "" };
+}
+
+function baseDecisionColorFromLimits(args: {
+  xw: number;
+  tw: number;
+  xwLimit: number;
+  twLimit: number;
+}): Decision {
+  const reasons: string[] = [];
   let color: Decision["color"] = "GREEN";
 
-  if (crossKt != null && crossKt > limitCross) {
+  if (args.tw > args.twLimit) {
     color = "RED";
-    reasons.push(`Crosswind ${crossKt.toFixed(1)}kt > Limit ${limitCross}kt`);
+    reasons.push(`Tailwind ${args.tw.toFixed(0)}kt > limit ${args.twLimit}kt`);
+  } else if (args.tw > Math.max(0, args.twLimit - 2)) {
+    color = color === "RED" ? "RED" : "AMBER";
+    reasons.push(`Tailwind near limit (${args.tw.toFixed(0)}kt / ${args.twLimit}kt)`);
   }
-  if (tailKt != null && tailKt > limitTail) {
+
+  if (args.xw > args.xwLimit) {
     color = "RED";
-    reasons.push(`Tailwind ${tailKt.toFixed(1)}kt > Limit ${limitTail}kt`);
-  }
-
-  // TAFのリスクを加点
-  if (taf.hasTS) {
+    reasons.push(`Crosswind ${args.xw.toFixed(0)}kt > limit ${args.xwLimit}kt`);
+  } else if (args.xw > Math.max(0, args.xwLimit - 3)) {
     color = color === "RED" ? "RED" : "AMBER";
-    reasons.push("TAF: Thunderstorm (TS) risk");
-  }
-  if (taf.hasCB) {
-    color = color === "RED" ? "RED" : "AMBER";
-    reasons.push("TAF: CB present risk");
+    reasons.push(`Crosswind near limit (${args.xw.toFixed(0)}kt / ${args.xwLimit}kt)`);
   }
 
-  // TEMPO/BECMGは「トレンド注意」扱い
-  if (taf.hasTEMPO) {
-    if (tempoRiskPolicy === "RED" && color !== "RED") color = "RED";
-    else if (color === "GREEN") color = "AMBER";
-    reasons.push("TAF: TEMPO (temporary deterioration) present");
-  }
-  if (taf.hasBECMG) {
-    if (color === "GREEN") color = "AMBER";
-    reasons.push("TAF: BECMG (trend/change) present");
-  }
-  if (taf.hasPROB) {
-    if (color === "GREEN") color = "AMBER";
-    reasons.push("TAF: PROB30/40 present");
-  }
-
-  if (reasons.length === 0) reasons.push("No major limiting factors detected (basic logic).");
   return { color, reasons };
 }
 
-function pillClasses(color: Decision["color"]) {
-  if (color === "GREEN") return "bg-emerald-600/20 text-emerald-200 border-emerald-500/30";
-  if (color === "AMBER") return "bg-amber-600/20 text-amber-200 border-amber-500/30";
-  return "bg-rose-600/20 text-rose-200 border-rose-500/30";
+function mergeColor(current: Decision["color"], next: Decision["color"]): Decision["color"] {
+  const rank = { GREEN: 0, AMBER: 1, RED: 2 } as const;
+  return rank[next] > rank[current] ? next : current;
 }
 
-function cardBorder(color: Decision["color"]) {
-  if (color === "GREEN") return "border-emerald-500/30";
-  if (color === "AMBER") return "border-amber-500/30";
-  return "border-rose-500/30";
+function colorBadge(color: Decision["color"]) {
+  const bg =
+    color === "GREEN" ? "#0b6" : color === "AMBER" ? "#f5a300" : "#e22";
+  return {
+    display: "inline-block",
+    padding: "4px 10px",
+    borderRadius: 999,
+    color: "#fff",
+    fontWeight: 700 as const,
+    background: bg,
+    letterSpacing: 0.3,
+    fontSize: 12,
+  };
+}
+
+function cardStyle() {
+  return {
+    border: "1px solid rgba(255,255,255,0.12)",
+    borderRadius: 14,
+    padding: 14,
+    background: "rgba(255,255,255,0.03)",
+  } as const;
 }
 
 export default function Page() {
-  const [query, setQuery] = useState("RJTT");
-  const [selectedICAO, setSelectedICAO] = useState("RJTT");
+  const [selectedIcao, setSelectedIcao] = useState<string>("RJTT");
+  const [icaoInput, setIcaoInput] = useState<string>("RJTT");
+  const [selectedAirport, setSelectedAirport] = useState<Airport | null>(null);
 
-  const [limitCross, setLimitCross] = useState(20); // kt
-  const [limitTail, setLimitTail] = useState(10); // kt（簡易）
-  const [tempoRiskPolicy, setTempoRiskPolicy] = useState<"AMBER" | "RED">("AMBER");
+  // Runway list in UI (comes from airports.ts if available)
+  const [runways, setRunways] = useState<Runway[]>([]);
+  const [selectedRunwayId, setSelectedRunwayId] = useState<string>("");
 
-  const [runways, setRunways] = useState<RunwayItem[]>([
-    { id: "34", headingDeg: 340 },
-    { id: "16", headingDeg: 160 },
-  ]);
-  const [selectedRunwayId, setSelectedRunwayId] = useState<string>("34");
+  // Limits (steady vs gust)
+  const [limitCrossSteady, setLimitCrossSteady] = useState<number>(20);
+  const [limitCrossGust, setLimitCrossGust] = useState<number>(25);
+  const [limitTailSteady, setLimitTailSteady] = useState<number>(10);
+  const [limitTailGust, setLimitTailGust] = useState<number>(10);
 
-  const [data, setData] = useState<WxApiResponse | null>(null);
+  // Policy
+  const [tempoConvectivePolicy, setTempoConvectivePolicy] = useState<"AMBER" | "RED">("RED");
+
+  // Fetched WX
   const [loading, setLoading] = useState(false);
-  const [err, setErr] = useState<string | null>(null);
+  const [wx, setWx] = useState<WxApiResponse | null>(null);
+  const [error, setError] = useState<string | null>(null);
 
-  const suggestions = useMemo(() => {
-    const q = query.trim().toUpperCase();
-    if (!q) return [];
-    return AIRPORTS.filter((a) => {
-      const hay = `${a.icao} ${a.iata} ${a.name} ${a.city}`.toUpperCase();
-      return hay.includes(q);
-    }).slice(0, 8);
-  }, [query]);
+  // Find airport
+  useEffect(() => {
+    const a = AIRPORTS.find((x) => x.icao.toUpperCase() === selectedIcao.toUpperCase()) || null;
+    setSelectedAirport(a);
 
-  const selectedAirport = useMemo(() => {
-    return AIRPORTS.find((a) => a.icao === selectedICAO.toUpperCase()) ?? null;
-  }, [selectedICAO]);
+    if (a?.runways?.length) {
+      setRunways(a.runways);
+      setSelectedRunwayId(a.runways[0].id);
+    } else {
+      setRunways([]);
+      setSelectedRunwayId("");
+    }
+  }, [selectedIcao]);
+
+  // Autocomplete list
+  const filteredAirports = useMemo(() => {
+    const q = icaoInput.trim().toUpperCase();
+    if (!q) return AIRPORTS.slice(0, 20);
+    const res = AIRPORTS.filter((a) => {
+      return (
+        a.icao.toUpperCase().includes(q) ||
+        a.iata.toUpperCase().includes(q) ||
+        a.name.toUpperCase().includes(q) ||
+        a.city.toUpperCase().includes(q)
+      );
+    });
+    return res.slice(0, 20);
+  }, [icaoInput]);
 
   async function fetchWx(icao: string) {
     setLoading(true);
-    setErr(null);
+    setError(null);
+    setWx(null);
     try {
-      const res = await fetch(`/api/weather?icao=${encodeURIComponent(icao)}`, { cache: "no-store" });
-      const json = (await res.json()) as WxApiResponse;
-      setData(json);
+      const url = `/api/weather?icao=${encodeURIComponent(icao.trim().toUpperCase())}`;
+      const r = await fetch(url, { cache: "no-store" });
+      const j = (await r.json()) as WxApiResponse;
+
+      if (!r.ok || j.error) {
+        throw new Error(j.error || `HTTP ${r.status}`);
+      }
+      setWx(j);
     } catch (e: any) {
-      setErr(e?.message ?? "Fetch failed");
-      setData(null);
+      setError(e?.message || String(e));
     } finally {
       setLoading(false);
     }
   }
 
   useEffect(() => {
-    fetchWx(selectedICAO);
+    // initial fetch
+    fetchWx(selectedIcao);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  const metarRaw = data?.metar?.raw ?? (data as any)?.raw?.raw ?? null;
-  const tafRaw = data?.taf ?? (data as any)?.raw?.taf ?? null;
+  const metarRaw = wx?.metar?.raw || "";
+  const tafRaw = wx?.taf?.raw || "";
 
-  const wind = useMemo(() => parseWindFromMetarRaw(metarRaw), [metarRaw]);
+  const metarWind = useMemo(() => parseMetarWind(metarRaw), [metarRaw]);
   const tafSignals = useMemo(() => parseTafSignals(tafRaw), [tafRaw]);
 
-  const selectedRunway = useMemo(
-    () => runways.find((r) => r.id === selectedRunwayId) ?? runways[0],
-    [runways, selectedRunwayId]
-  );
+  const components: RunwayComponent[] = useMemo(() => {
+    const dir = metarWind.dirDeg;
+    const spd = metarWind.spdKt;
+    if (dir == null || spd == null || !runways.length) return [];
 
-  const rwyTable = useMemo(() => {
-    // VRBは最悪ケースとして 90deg 横風扱い（保守的）
-    const baseDir = wind.dirDeg ?? (selectedRunway ? (selectedRunway.headingDeg + 90) % 360 : 0);
-    const baseSpd = wind.speedKt ?? 0;
-    const gustSpd = wind.gustKt ?? null;
-
-    return runways.map((r) => {
-      const base = computeWindComponents(baseDir, baseSpd, r.headingDeg);
-      const gust = gustSpd != null ? computeWindComponents(baseDir, gustSpd, r.headingDeg) : null;
-
-      const cross = Math.abs(base.crossKt);
-      const tail = Math.max(0, -base.headKt); // tailwind only
-      const crossG = gust ? Math.abs(gust.crossKt) : null;
-      const tailG = gust ? Math.max(0, -gust.headKt) : null;
-
-      const decision = decisionFrom(
-        crossG ?? cross,
-        tailG ?? tail,
-        limitCross,
-        limitTail,
-        tafSignals,
-        tempoRiskPolicy
-      );
+    return runways.map((rwy) => {
+      const steady = calcComponents(dir, spd, rwy.magHdg);
+      const gustSpd = metarWind.gustKt ?? spd;
+      const gust = calcComponents(dir, gustSpd, rwy.magHdg);
 
       return {
-        rwy: r.id,
-        headingDeg: r.headingDeg,
-        diffDeg: base.diffDeg,
-        headKt: base.headKt,
-        crossKt: base.crossKt,
-        crossAbs: cross,
-        tailKt: tail,
-        crossAbsG: crossG,
-        tailKtG: tailG,
-        decision,
+        runwayId: rwy.id,
+        magHdg: rwy.magHdg,
+        steady: {
+          headwind: steady.headwind,
+          crosswind: steady.crosswind,
+          tailwind: steady.tailwind,
+          from: steady.from,
+        },
+        gust: {
+          headwind: gust.headwind,
+          crosswind: gust.crosswind,
+          tailwind: gust.tailwind,
+          from: gust.from,
+        },
       };
     });
-  }, [runways, wind.dirDeg, wind.speedKt, wind.gustKt, limitCross, limitTail, tafSignals, tempoRiskPolicy, selectedRunway]);
+  }, [metarWind.dirDeg, metarWind.spdKt, metarWind.gustKt, runways]);
 
-  const chosen = useMemo(() => rwyTable.find((x) => x.rwy === selectedRunwayId) ?? rwyTable[0], [rwyTable, selectedRunwayId]);
+  const selectedComp = useMemo(() => {
+    return components.find((c) => c.runwayId === selectedRunwayId) || null;
+  }, [components, selectedRunwayId]);
 
-  const topDecision = chosen?.decision ?? { color: "GREEN", reasons: ["—"] };
+  const decision = useMemo(() => {
+    const reasons: string[] = [];
+    let color: Decision["color"] = "GREEN";
 
-  function addRunway() {
-    const n = runways.length + 1;
-    setRunways([...runways, { id: `RWY${n}`, headingDeg: 0 }]);
-    setSelectedRunwayId(`RWY${n}`);
-  }
+    if (!selectedComp || metarWind.dirDeg == null || metarWind.spdKt == null) {
+      return { color: "AMBER", reasons: ["Insufficient wind/runway data for decision"] };
+    }
 
-  function updateRunway(idx: number, patch: Partial<RunwayItem>) {
-    setRunways((prev) => prev.map((r, i) => (i === idx ? { ...r, ...patch } : r)));
-  }
+    const hasGust = metarWind.gustKt != null;
+    const xwLimit = hasGust ? limitCrossGust : limitCrossSteady;
+    const twLimit = hasGust ? limitTailGust : limitTailSteady;
 
-  function removeRunway(idx: number) {
-    setRunways((prev) => {
-      const next = prev.filter((_, i) => i !== idx);
-      const fallback = next[0]?.id ?? "";
-      if (selectedRunwayId === prev[idx]?.id) setSelectedRunwayId(fallback);
-      return next.length ? next : [{ id: "RWY", headingDeg: 0 }];
+    const use = hasGust ? selectedComp.gust : selectedComp.steady;
+
+    const base = baseDecisionColorFromLimits({
+      xw: use.crosswind,
+      tw: use.tailwind,
+      xwLimit,
+      twLimit,
     });
-  }
 
-  const dispatchText = useMemo(() => {
-    const now = new Date().toISOString();
-    const windLine = wind.raw ? `WIND: ${wind.raw}` : `WIND: N/A`;
-    const limLine = `LIMITS: XWIND ${limitCross}kt / TAIL ${limitTail}kt`;
-    const chosenLine = chosen
-      ? `RWY ${chosen.rwy} HDG ${chosen.headingDeg}° | XWIND ${chosen.crossAbs.toFixed(1)}kt${chosen.crossAbsG != null ? ` (G ${chosen.crossAbsG.toFixed(1)}kt)` : ""} | TAIL ${chosen.tailKt.toFixed(1)}kt${chosen.tailKtG != null ? ` (G ${chosen.tailKtG.toFixed(1)}kt)` : ""}`
-      : "RWY: N/A";
+    color = mergeColor(color, base.color);
+    reasons.push(...base.reasons);
 
-    const risk = [
-      tafSignals.hasTS ? "TS" : null,
-      tafSignals.hasCB ? "CB" : null,
-      tafSignals.hasTEMPO ? "TEMPO" : null,
-      tafSignals.hasBECMG ? "BECMG" : null,
-      tafSignals.hasPROB ? "PROB" : null,
-    ].filter(Boolean);
+    // Convective policy
+    if (tafSignals.tempoHasTSorCB) {
+      const c = tempoConvectivePolicy === "RED" ? "RED" : "AMBER";
+      color = mergeColor(color, c);
+      reasons.push("TAF: TEMPO includes TS/CB → convective risk policy");
+    } else if (tafSignals.hasTSorCB) {
+      // TS/CB somewhere in TAF -> at least AMBER
+      color = mergeColor(color, "AMBER");
+      reasons.push("TAF: TS/CB present → convective risk");
+    }
 
-    return [
-      `DISPATCH RELEASE (WX)`,
-      `TIME: ${now}`,
-      `APT: ${selectedICAO.toUpperCase()}${selectedAirport ? ` (${selectedAirport.name})` : ""}`,
-      windLine,
-      limLine,
-      chosenLine,
-      `GO/NO-GO: ${topDecision.color}`,
-      `ALERTS: ${risk.length ? risk.join(", ") : "None"}`,
-      ``,
-      `METAR: ${metarRaw ?? "N/A"}`,
-      `TAF: ${tafRaw ?? "N/A"}`,
-      ``,
-      `REASONS:`,
-      ...topDecision.reasons.map((r) => `- ${r}`),
-    ].join("\n");
-  }, [chosen, limitCross, limitTail, metarRaw, selectedAirport, selectedICAO, tafRaw, tafSignals, topDecision.color, topDecision.reasons, wind.raw]);
+    // Extra advisory flags (non-blocking)
+    if (tafSignals.hasTEMPO) reasons.push("TAF: TEMPO present (variability)");
+    if (tafSignals.hasBECMG) reasons.push("TAF: BECMG present (trend change)");
+
+    // If no explicit reasons and green, keep a friendly note
+    if (reasons.length === 0) reasons.push("Within limits (based on selected policy/limits)");
+
+    return { color, reasons };
+  }, [
+    selectedComp,
+    metarWind.dirDeg,
+    metarWind.spdKt,
+    metarWind.gustKt,
+    limitCrossGust,
+    limitCrossSteady,
+    limitTailGust,
+    limitTailSteady,
+    tafSignals,
+    tempoConvectivePolicy,
+  ]);
+
+  const page = useMemo(() => {
+    const title = "ARI Safety Intelligence";
+    const sub = "METAR/TAF → Runway crosswind & dispatch-style decision";
+    return { title, sub };
+  }, []);
 
   return (
-    <main className="min-h-screen bg-zinc-950 text-zinc-100">
-      <div className="mx-auto max-w-6xl px-4 py-8">
-        {/* Header */}
-        <div className="flex flex-col gap-2 md:flex-row md:items-end md:justify-between">
-          <div>
-            <h1 className="text-2xl md:text-3xl font-semibold tracking-tight">
-              ARI Safety Intelligence
-            </h1>
-            <p className="text-zinc-400">
-              METAR / TAF → Trend + Alerts + RWY Crosswind → GO/NO-GO
-            </p>
-          </div>
+    <main style={{ minHeight: "100vh", padding: 18, fontFamily: "system-ui, -apple-system, Segoe UI, Roboto, sans-serif" }}>
+      <div style={{ maxWidth: 1100, margin: "0 auto" }}>
+        <header style={{ marginBottom: 14 }}>
+          <h1 style={{ margin: 0, fontSize: 26 }}>{page.title}</h1>
+          <div style={{ opacity: 0.75, marginTop: 4 }}>{page.sub}</div>
+        </header>
 
-          <div className={`inline-flex items-center gap-2 rounded-full border px-3 py-1 ${pillClasses(topDecision.color)}`}>
-            <span className="text-xs font-semibold">GO/NO-GO</span>
-            <span className="text-sm font-bold">{topDecision.color}</span>
-          </div>
-        </div>
-
-        {/* Controls */}
-        <div className="mt-6 grid grid-cols-1 gap-4 md:grid-cols-3">
-          {/* Airport picker */}
-          <div className="rounded-2xl border border-white/10 bg-zinc-900/40 p-4">
-            <div className="text-sm font-semibold">Airport</div>
-            <div className="mt-2 relative">
-              <input
-                value={query}
-                onChange={(e) => setQuery(e.target.value.toUpperCase())}
-                placeholder="ICAO / IATA / City (e.g., RJTT, HND, Taipei)"
-                className="w-full rounded-xl border border-white/10 bg-zinc-950/60 px-3 py-2 text-sm outline-none focus:border-white/20"
-              />
-              {suggestions.length > 0 && (
-                <div className="absolute z-10 mt-2 w-full overflow-hidden rounded-xl border border-white/10 bg-zinc-950 shadow-xl">
-                  {suggestions.map((s) => (
+        <section style={{ display: "grid", gridTemplateColumns: "1fr", gap: 12 }}>
+          {/* Controls */}
+          <div style={cardStyle()}>
+            <div style={{ display: "grid", gridTemplateColumns: "1.2fr 0.8fr", gap: 10 }}>
+              <div>
+                <div style={{ fontWeight: 700, marginBottom: 6 }}>Airport (ICAO)</div>
+                <input
+                  value={icaoInput}
+                  onChange={(e) => setIcaoInput(e.target.value)}
+                  placeholder="e.g. RJTT / RJAA / RCTP"
+                  style={{
+                    width: "100%",
+                    padding: "10px 12px",
+                    borderRadius: 10,
+                    border: "1px solid rgba(255,255,255,0.16)",
+                    background: "rgba(0,0,0,0.25)",
+                    color: "inherit",
+                    outline: "none",
+                  }}
+                />
+                <div style={{ marginTop: 10, display: "flex", gap: 8, flexWrap: "wrap" }}>
+                  {filteredAirports.map((a) => (
                     <button
-                      key={s.icao}
+                      key={a.icao}
                       onClick={() => {
-                        setSelectedICAO(s.icao);
-                        setQuery(s.icao);
-                        fetchWx(s.icao);
+                        setSelectedIcao(a.icao);
+                        setIcaoInput(a.icao);
                       }}
-                      className="flex w-full items-center justify-between px-3 py-2 text-left text-sm hover:bg-white/5"
+                      style={{
+                        padding: "7px 10px",
+                        borderRadius: 999,
+                        border: a.icao === selectedIcao ? "1px solid rgba(255,255,255,0.55)" : "1px solid rgba(255,255,255,0.16)",
+                        background: "rgba(255,255,255,0.06)",
+                        color: "inherit",
+                        cursor: "pointer",
+                        fontSize: 12,
+                      }}
+                      title={`${a.name} / ${a.city} (${a.iata})`}
                     >
-                      <span className="font-semibold">{s.icao}</span>
-                      <span className="text-zinc-400">{s.iata} • {s.city}</span>
+                      <b>{a.icao}</b> <span style={{ opacity: 0.8 }}>{a.iata}</span>
                     </button>
                   ))}
                 </div>
-              )}
+
+                <div style={{ marginTop: 10, display: "flex", gap: 10, alignItems: "center" }}>
+                  <button
+                    onClick={() => {
+                      const icao = icaoInput.trim().toUpperCase();
+                      if (!icao) return;
+                      setSelectedIcao(icao);
+                      fetchWx(icao);
+                    }}
+                    style={{
+                      padding: "10px 14px",
+                      borderRadius: 12,
+                      border: "1px solid rgba(255,255,255,0.2)",
+                      background: "rgba(255,255,255,0.08)",
+                      color: "inherit",
+                      cursor: "pointer",
+                      fontWeight: 700,
+                    }}
+                  >
+                    {loading ? "Fetching..." : "Fetch METAR/TAF"}
+                  </button>
+
+                  <span style={{ opacity: 0.75, fontSize: 13 }}>
+                    Current: <b>{selectedIcao}</b>{" "}
+                    {selectedAirport ? (
+                      <>
+                        — {selectedAirport.name} / {selectedAirport.city}
+                      </>
+                    ) : (
+                      "— (not in list)"
+                    )}
+                  </span>
+                </div>
+              </div>
+
+              <div>
+                <div style={{ fontWeight: 700, marginBottom: 6 }}>Policy</div>
+                <div style={{ display: "grid", gap: 10 }}>
+                  <div style={{ ...cardStyle(), padding: 10 }}>
+                    <div style={{ fontWeight: 650, marginBottom: 6 }}>TEMPO convective policy</div>
+                    <select
+                      value={tempoConvectivePolicy}
+                      onChange={(e) => setTempoConvectivePolicy(e.target.value as any)}
+                      style={{
+                        width: "100%",
+                        padding: "10px 12px",
+                        borderRadius: 10,
+                        border: "1px solid rgba(255,255,255,0.16)",
+                        background: "rgba(0,0,0,0.25)",
+                        color: "inherit",
+                        outline: "none",
+                      }}
+                    >
+                      <option value="RED">TEMPO includes TS/CB → RED</option>
+                      <option value="AMBER">TEMPO includes TS/CB → AMBER</option>
+                    </select>
+                    <div style={{ marginTop: 8, opacity: 0.7, fontSize: 12 }}>
+                      If TS/CB appears inside a TEMPO group, apply policy immediately.
+                    </div>
+                  </div>
+
+                  <div style={{ ...cardStyle(), padding: 10 }}>
+                    <div style={{ fontWeight: 650, marginBottom: 8 }}>Limits (kt)</div>
+
+                    <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10 }}>
+                      <div>
+                        <div style={{ fontSize: 12, opacity: 0.8, marginBottom: 5 }}>Crosswind (steady)</div>
+                        <input
+                          type="number"
+                          value={limitCrossSteady}
+                          onChange={(e) => setLimitCrossSteady(Number(e.target.value))}
+                          style={{
+                            width: "100%",
+                            padding: "10px 12px",
+                            borderRadius: 10,
+                            border: "1px solid rgba(255,255,255,0.16)",
+                            background: "rgba(0,0,0,0.25)",
+                            color: "inherit",
+                            outline: "none",
+                          }}
+                        />
+                      </div>
+                      <div>
+                        <div style={{ fontSize: 12, opacity: 0.8, marginBottom: 5 }}>Crosswind (gust/peak)</div>
+                        <input
+                          type="number"
+                          value={limitCrossGust}
+                          onChange={(e) => setLimitCrossGust(Number(e.target.value))}
+                          style={{
+                            width: "100%",
+                            padding: "10px 12px",
+                            borderRadius: 10,
+                            border: "1px solid rgba(255,255,255,0.16)",
+                            background: "rgba(0,0,0,0.25)",
+                            color: "inherit",
+                            outline: "none",
+                          }}
+                        />
+                      </div>
+                      <div>
+                        <div style={{ fontSize: 12, opacity: 0.8, marginBottom: 5 }}>Tailwind (steady)</div>
+                        <input
+                          type="number"
+                          value={limitTailSteady}
+                          onChange={(e) => setLimitTailSteady(Number(e.target.value))}
+                          style={{
+                            width: "100%",
+                            padding: "10px 12px",
+                            borderRadius: 10,
+                            border: "1px solid rgba(255,255,255,0.16)",
+                            background: "rgba(0,0,0,0.25)",
+                            color: "inherit",
+                            outline: "none",
+                          }}
+                        />
+                      </div>
+                      <div>
+                        <div style={{ fontSize: 12, opacity: 0.8, marginBottom: 5 }}>Tailwind (gust/peak)</div>
+                        <input
+                          type="number"
+                          value={limitTailGust}
+                          onChange={(e) => setLimitTailGust(Number(e.target.value))}
+                          style={{
+                            width: "100%",
+                            padding: "10px 12px",
+                            borderRadius: 10,
+                            border: "1px solid rgba(255,255,255,0.16)",
+                            background: "rgba(0,0,0,0.25)",
+                            color: "inherit",
+                            outline: "none",
+                          }}
+                        />
+                      </div>
+                    </div>
+
+                    <div style={{ marginTop: 10, opacity: 0.7, fontSize: 12 }}>
+                      If METAR has gusts (GxxKT), decision uses gust limits. Otherwise uses steady limits.
+                    </div>
+                  </div>
+                </div>
+              </div>
             </div>
 
-            <div className="mt-3 flex gap-2">
-              <button
-                onClick={() => {
-                  const icao = query.trim().toUpperCase();
-                  if (!icao) return;
-                  setSelectedICAO(icao);
-                  fetchWx(icao);
-                }}
-                className="flex-1 rounded-xl bg-white text-zinc-900 px-3 py-2 text-sm font-semibold hover:opacity-90"
-              >
-                {loading ? "Loading..." : "Fetch WX"}
-              </button>
-              <button
-                onClick={() => fetchWx(selectedICAO)}
-                className="rounded-xl border border-white/10 px-3 py-2 text-sm hover:bg-white/5"
-                title="Refresh"
-              >
-                ↻
-              </button>
-            </div>
-
-            <div className="mt-3 text-xs text-zinc-400">
-              {data?.time ? `Updated: ${data.time}` : "—"}
-              {err ? <div className="mt-1 text-rose-300">Error: {err}</div> : null}
-            </div>
+            {error ? (
+              <div style={{ marginTop: 12, ...cardStyle(), borderColor: "rgba(255,0,0,0.35)" }}>
+                <b style={{ color: "#f66" }}>Error:</b> {error}
+              </div>
+            ) : null}
           </div>
 
-          {/* Limits */}
-          <div className="rounded-2xl border border-white/10 bg-zinc-900/40 p-4">
-            <div className="text-sm font-semibold">Limits</div>
-
-            <div className="mt-3 grid grid-cols-2 gap-3">
-              <label className="text-xs text-zinc-400">
-                Crosswind Limit (kt)
-                <input
-                  type="number"
-                  value acclamp={undefined as any}
-                  value={limitCross}
-                  onChange={(e) => setLimitCross(clamp(Number(e.target.value || 0), 0, 99))}
-                  className="mt-1 w-full rounded-xl border border-white/10 bg-zinc-950/60 px-3 py-2 text-sm text-zinc-100 outline-none focus:border-white/20"
-                />
-              </label>
-
-              <label className="text-xs text-zinc-400">
-                Tailwind Limit (kt)
-                <input
-                  type="number"
-                  value={limitTail}
-                  onChange={(e) => setLimitTail(clamp(Number(e.target.value || 0), 0, 30))}
-                  className="mt-1 w-full rounded-xl border border-white/10 bg-zinc-950/60 px-3 py-2 text-sm text-zinc-100 outline-none focus:border-white/20"
-                />
-              </label>
-            </div>
-
-            <div className="mt-3">
-              <div className="text-xs text-zinc-400">TEMPO risk policy</div>
-              <div className="mt-2 flex gap-2">
-                <button
-                  onClick={() => setTempoRiskPolicy("AMBER")}
-                  className={`rounded-xl px-3 py-2 text-sm border ${tempoRiskPolicy === "AMBER" ? "bg-white text-zinc-900 border-white/20" : "border-white/10 hover:bg-white/5"}`}
-                >
-                  AMBER
-                </button>
-                <button
-                  onClick={() => setTempoRiskPolicy("RED")}
-                  className={`rounded-xl px-3 py-2 text-sm border ${tempoRiskPolicy === "RED" ? "bg-white text-zinc-900 border-white/20" : "border-white/10 hover:bg-white/5"}`}
-                >
-                  RED
-                </button>
+          {/* Decision + Runway selection */}
+          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12 }}>
+            <div style={cardStyle()}>
+              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 10 }}>
+                <div>
+                  <div style={{ fontWeight: 800, fontSize: 16 }}>Dispatch Decision</div>
+                  <div style={{ opacity: 0.75, fontSize: 13, marginTop: 3 }}>
+                    Runway-based crosswind/tailwind + TAF convective policy
+                  </div>
+                </div>
+                <span style={colorBadge(decision.color)}>{decision.color}</span>
               </div>
-              <div className="mt-2 text-xs text-zinc-500">
-                * TEMPOは「一時的悪化」。保守運用なら RED を推奨。
-              </div>
-            </div>
-          </div>
 
-          {/* METAR/TAF quick */}
-          <div className={`rounded-2xl border bg-zinc-900/40 p-4 ${cardBorder(topDecision.color)}`}>
-            <div className="flex items-center justify-between">
-              <div className="text-sm font-semibold">WX Snapshot</div>
-              <div className={`rounded-full border px-3 py-1 text-xs font-semibold ${pillClasses(topDecision.color)}`}>
-                {topDecision.color}
+              <div style={{ marginTop: 12 }}>
+                <div style={{ fontWeight: 700, marginBottom: 6 }}>Reasons</div>
+                <ul style={{ margin: 0, paddingLeft: 18, opacity: 0.95 }}>
+                  {decision.reasons.map((r, i) => (
+                    <li key={i} style={{ marginBottom: 6 }}>
+                      {r}
+                    </li>
+                  ))}
+                </ul>
               </div>
             </div>
 
-            <div className="mt-3 space-y-2 text-sm">
-              <div className="rounded-xl border border-white/10 bg-zinc-950/60 p-3">
-                <div className="text-xs text-zinc-400">METAR</div>
-                <div className="mt-1 break-words">{metarRaw ?? "—"}</div>
+            <div style={cardStyle()}>
+              <div style={{ fontWeight: 800, fontSize: 16 }}>Runway & Wind</div>
+
+              <div style={{ marginTop: 10, display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10 }}>
+                <div>
+                  <div style={{ fontSize: 12, opacity: 0.8, marginBottom: 5 }}>Selected RWY (MAG)</div>
+                  <select
+                    value={selectedRunwayId}
+                    onChange={(e) => setSelectedRunwayId(e.target.value)}
+                    style={{
+                      width: "100%",
+                      padding: "10px 12px",
+                      borderRadius: 10,
+                      border: "1px solid rgba(255,255,255,0.16)",
+                      background: "rgba(0,0,0,0.25)",
+                      color: "inherit",
+                      outline: "none",
+                    }}
+                  >
+                    {runways.length ? (
+                      runways.map((r) => (
+                        <option key={r.id} value={r.id}>
+                          {r.id} (MAG {String(r.magHdg).padStart(3, "0")})
+                        </option>
+                      ))
+                    ) : (
+                      <option value="">(No RWY data in airports.ts)</option>
+                    )}
+                  </select>
+                  <div style={{ marginTop: 6, opacity: 0.7, fontSize: 12 }}>
+                    RWY headings should be MAG from RNAV chart basis (your policy).
+                  </div>
+                </div>
+
+                <div>
+                  <div style={{ fontSize: 12, opacity: 0.8, marginBottom: 5 }}>METAR Wind</div>
+                  <div style={{ ...cardStyle(), padding: 10 }}>
+                    <div style={{ fontSize: 14 }}>
+                      <b>Dir:</b>{" "}
+                      {metarWind.dirDeg == null ? (
+                        <span style={{ opacity: 0.7 }}>VRB/Unknown</span>
+                      ) : (
+                        <span>{String(metarWind.dirDeg).padStart(3, "0")}°</span>
+                      )}
+                    </div>
+                    <div style={{ fontSize: 14, marginTop: 4 }}>
+                      <b>Spd:</b> {metarWind.spdKt ?? <span style={{ opacity: 0.7 }}>—</span>} kt
+                    </div>
+                    <div style={{ fontSize: 14, marginTop: 4 }}>
+                      <b>Gust:</b> {metarWind.gustKt ?? <span style={{ opacity: 0.7 }}>—</span>} kt
+                    </div>
+                  </div>
+                </div>
               </div>
 
-              <div className="rounded-xl border border-white/10 bg-zinc-950/60 p-3">
-                <div className="text-xs text-zinc-400">TAF</div>
-                <div className="mt-1 break-words">{tafRaw ?? "—"}</div>
-              </div>
+              <div style={{ marginTop: 12 }}>
+                <div style={{ fontWeight: 700, marginBottom: 6 }}>RWY Components (kt)</div>
 
-              <div className="flex flex-wrap gap-2">
-                {tafSignals.hasTS && <span className="rounded-full border border-rose-500/30 bg-rose-600/20 px-3 py-1 text-xs text-rose-200">⛈ TS</span>}
-                {tafSignals.hasCB && <span className="rounded-full border border-rose-500/30 bg-rose-600/20 px-3 py-1 text-xs text-rose-200">CB</span>}
-                {tafSignals.hasTEMPO && <span className="rounded-full border border-amber-500/30 bg-amber-600/20 px-3 py-1 text-xs text-amber-200">TEMPO</span>}
-                {tafSignals.hasBECMG && <span className="rounded-full border border-amber-500/30 bg-amber-600/20 px-3 py-1 text-xs text-amber-200">BECMG</span>}
-                {tafSignals.hasPROB && <span className="rounded-full border border-amber-500/30 bg-amber-600/20 px->
-                  3 py-1 text-xs text-amber-200">PROB</span>}
-                {!tafSignals.hasTS && !tafSignals.hasCB && !tafSignals.hasTEMPO && !tafSignals.hasBECMG && !tafSignals.hasPROB && (
-                  <span className="rounded-full border border-emerald-500/30 bg-emerald-600/20 px-3 py-1 text-xs text-emerald-200">No major TAF flags</span>
+                {!components.length ? (
+                  <div style={{ opacity: 0.75 }}>
+                    Need (1) METAR wind parsed (dddssKT) and (2) runway list in airports.ts to compute.
+                  </div>
+                ) : (
+                  <div style={{ overflowX: "auto" }}>
+                    <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 13 }}>
+                      <thead>
+                        <tr style={{ textAlign: "left", opacity: 0.85 }}>
+                          <th style={{ padding: "8px 6px" }}>RWY</th>
+                          <th style={{ padding: "8px 6px" }}>MAG</th>
+                          <th style={{ padding: "8px 6px" }}>XW steady</th>
+                          <th style={{ padding: "8px 6px" }}>TW steady</th>
+                          <th style={{ padding: "8px 6px" }}>XW peak</th>
+                          <th style={{ padding: "8px 6px" }}>TW peak</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {components.map((c) => {
+                          const isSel = c.runwayId === selectedRunwayId;
+                          return (
+                            <tr
+                              key={c.runwayId}
+                              style={{
+                                borderTop: "1px solid rgba(255,255,255,0.08)",
+                                background: isSel ? "rgba(255,255,255,0.06)" : "transparent",
+                              }}
+                            >
+                              <td style={{ padding: "8px 6px", fontWeight: 800 }}>{c.runwayId}</td>
+                              <td style={{ padding: "8px 6px" }}>{String(c.magHdg).padStart(3, "0")}</td>
+
+                              <td style={{ padding: "8px 6px" }}>
+                                {c.steady.crosswind.toFixed(0)} {c.steady.from !== "-" ? `(${c.steady.from})` : ""}
+                              </td>
+                              <td style={{ padding: "8px 6px" }}>{c.steady.tailwind.toFixed(0)}</td>
+
+                              <td style={{ padding: "8px 6px" }}>
+                                {c.gust.crosswind.toFixed(0)} {c.gust.from !== "-" ? `(${c.gust.from})` : ""}
+                              </td>
+                              <td style={{ padding: "8px 6px" }}>{c.gust.tailwind.toFixed(0)}</td>
+                            </tr>
+                          );
+                        })}
+                      </tbody>
+                    </table>
+                  </div>
                 )}
               </div>
             </div>
           </div>
-        </div>
 
-        {/* RWY Crosswind table */}
-        <div className="mt-6 grid grid-cols-1 gap-4 md:grid-cols-2">
-          <div className="rounded-2xl border border-white/10 bg-zinc-900/40 p-4">
-            <div className="flex items-center justify-between">
-              <div className="text-sm font-semibold">Runways</div>
-              <button
-                onClick={addRunway}
-                className="rounded-xl border border-white/10 px-3 py-2 text-sm hover:bg-white/5"
-              >
-                + Add RWY
-              </button>
-            </div>
-
-            <div className="mt-3 space-y-2">
-              {runways.map((r, idx) => (
-                <div key={r.id} className="flex gap-2 items-center">
-                  <input
-                    value={r.id}
-                    onChange={(e) => updateRunway(idx, { id: e.target.value.toUpperCase() })}
-                    className="w-24 rounded-xl border border-white/10 bg-zinc-950/60 px-3 py-2 text-sm outline-none focus:border-white/20"
-                    placeholder="34L"
-                  />
-                  <input
-                    type="number"
-                    value={r.headingDeg}
-                    onChange={(e) => updateRunway(idx, { headingDeg: clamp(Number(e.target.value || 0), 0, 359) })}
-                    className="w-28 rounded-xl border border-white/10 bg-zinc-950/60 px-3 py-2 text-sm outline-none focus:border-white/20"
-                    placeholder="340"
-                  />
-                  <button
-                    onClick={() => setSelectedRunwayId(r.id)}
-                    className={`flex-1 rounded-xl border px-3 py-2 text-sm ${
-                      selectedRunwayId === r.id
-                        ? "bg-white text-zinc-900 border-white/20"
-                        : "border-white/10 hover:bg-white/5"
-                    }`}
-                  >
-                    Select
-                  </button>
-                  <button
-                    onClick={() => removeRunway(idx)}
-                    className="rounded-xl border border-white/10 px-3 py-2 text-sm hover:bg-white/5"
-                    title="Remove"
-                  >
-                    🗑
-                  </button>
+          {/* Raw METAR/TAF + Quick warnings */}
+          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12 }}>
+            <div style={cardStyle()}>
+              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+                <div style={{ fontWeight: 800, fontSize: 16 }}>METAR</div>
+                <div style={{ opacity: 0.75, fontSize: 12 }}>
+                  {wx?.issueTime ? `issueTime: ${wx.issueTime}` : ""}
                 </div>
-              ))}
+              </div>
+
+              <div style={{ marginTop: 10, ...cardStyle(), padding: 10, whiteSpace: "pre-wrap", fontFamily: "ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace", fontSize: 12 }}>
+                {metarRaw || "(no METAR)"}
+              </div>
+
+              <div style={{ marginTop: 10, opacity: 0.8, fontSize: 13 }}>
+                <b>Tip:</b> API endpoint: <span style={{ fontFamily: "ui-monospace" }}>/api/weather?icao=RJTT</span>
+              </div>
             </div>
 
-            <div className="mt-4 rounded-xl border border-white/10 bg-zinc-950/60 p-3 text-sm">
-              <div className="text-xs text-zinc-400">Wind (from METAR)</div>
-              <div className="mt-1">
-                {wind.raw ? wind.raw : "N/A"}{" "}
-                {wind.dirDeg == null && wind.raw ? <span className="text-amber-200"> (VRB → conservative calc)</span> : null}
+            <div style={cardStyle()}>
+              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+                <div style={{ fontWeight: 800, fontSize: 16 }}>TAF</div>
+                <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+                  {tafSignals.hasTSorCB ? <span style={colorBadge("AMBER")}>TS/CB</span> : null}
+                  {tafSignals.tempoHasTSorCB ? <span style={colorBadge("RED")}>TEMPO TS/CB</span> : null}
+                </div>
+              </div>
+
+              <div style={{ marginTop: 10, ...cardStyle(), padding: 10, whiteSpace: "pre-wrap", fontFamily: "ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace", fontSize: 12 }}>
+                {tafRaw || "(no TAF)"}
+              </div>
+
+              <div style={{ marginTop: 10 }}>
+                <div style={{ fontWeight: 700, marginBottom: 6 }}>Quick flags</div>
+                <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+                  {tafSignals.hasTEMPO ? <span style={colorBadge("AMBER")}>TEMPO</span> : <span style={{ opacity: 0.6 }}>TEMPO: none</span>}
+                  {tafSignals.hasBECMG ? <span style={colorBadge("AMBER")}>BECMG</span> : <span style={{ opacity: 0.6 }}>BECMG: none</span>}
+                  {tafSignals.hasSHRA ? <span style={colorBadge("AMBER")}>SHRA</span> : null}
+                </div>
               </div>
             </div>
           </div>
 
-          <div className="rounded-2xl border border-white/10 bg-zinc-900/40 p-4">
-            <div className="text-sm font-semibold">RWY Crosswind (auto)</div>
-            <div className="mt-3 overflow-x-auto">
-              <table className="w-full text-sm">
-                <thead className="text-xs text-zinc-400">
-                  <tr>
-                    <th className="py-2 text-left">RWY</th>
-                    <th className="py-2 text-right">HDG</th>
-                    <th className="py-2 text-right">XWIND</th>
-                    <th className="py-2 text-right">TAIL</th>
-                    <th className="py-2 text-right">GO/NO-GO</th>
-                  </tr>
-                </thead>
-                <tbody className="divide-y divide-white/5">
-                  {rwyTable.map((row) => (
-                    <tr key={row.rwy} className={row.rwy === selectedRunwayId ? "bg-white/5" : ""}>
-                      <td className="py-2 font-semibold">{row.rwy}</td>
-                      <td className="py-2 text-right text-zinc-300">{row.headingDeg}°</td>
-                      <td className="py-2 text-right">
-                        {row.crossAbs.toFixed(1)}
-                        {row.crossAbsG != null ? <span className="text-zinc-400"> (G {row.crossAbsG.toFixed(1)})</span> : null}
-                      </td>
-                      <td className="py-2 text-right">
-                        {row.tailKt.toFixed(1)}
-                        {row.tailKtG != null ? <span className="text-zinc-400"> (G {row.tailKtG.toFixed(1)})</span> : null}
-                      </td>
-                      <td className="py-2 text-right">
-                        <span className={`inline-flex items-center rounded-full border px-2 py-1 text-xs ${pillClasses(row.decision.color)}`}>
-                          {row.decision.color}
-                        </span>
-                      </td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
-
-            <div className={`mt-4 rounded-xl border bg-zinc-950/60 p-3 ${cardBorder(topDecision.color)}`}>
-              <div className="text-xs text-zinc-400">Decision details (selected RWY)</div>
-              <ul className="mt-2 list-disc pl-5 space-y-1 text-sm text-zinc-200">
-                {topDecision.reasons.map((r, i) => (
-                  <li key={i}>{r}</li>
-                ))}
-              </ul>
+          {/* Debug / JSON (optional) */}
+          <div style={{ ...cardStyle(), opacity: 0.95 }}>
+            <div style={{ fontWeight: 800, fontSize: 16 }}>Debug JSON</div>
+            <div style={{ marginTop: 10, ...cardStyle(), padding: 10, whiteSpace: "pre-wrap", fontFamily: "ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace", fontSize: 12 }}>
+              {wx ? JSON.stringify(wx, null, 2) : loading ? "Loading..." : "(no data)"}
             </div>
           </div>
-        </div>
+        </section>
 
-        {/* Dispatch Release */}
-        <div className="mt-6 rounded-2xl border border-white/10 bg-zinc-900/40 p-4">
-          <div className="flex flex-col gap-2 md:flex-row md:items-center md:justify-between">
-            <div>
-              <div className="text-sm font-semibold">Dispatch Release (WX)</div>
-              <div className="text-xs text-zinc-400">
-                Copy/paste ready. (This is a simplified advisory tool, not an operational approval.)
-              </div>
-            </div>
-            <button
-              onClick={async () => {
-                await navigator.clipboard.writeText(dispatchText);
-                alert("Copied Dispatch Release to clipboard.");
-              }}
-              className="rounded-xl bg-white px-3 py-2 text-sm font-semibold text-zinc-900 hover:opacity-90"
-            >
-              Copy
-            </button>
-          </div>
-
-          <pre className="mt-3 whitespace-pre-wrap rounded-xl border border-white/10 bg-zinc-950/60 p-4 text-xs text-zinc-200">
-{dispatchText}
-          </pre>
-        </div>
-
-        {/* Footer */}
-        <div className="mt-8 text-xs text-zinc-500">
-          Notes: Crosswind/headwind is computed with basic trig using METAR wind. VRB wind is treated conservatively.
-          For real ops: use company SOP, runway magnetic heading, gust/peak, braking action, and crew qualification minima.
-        </div>
+        <footer style={{ marginTop: 18, opacity: 0.65, fontSize: 12 }}>
+          Vercel domain example: <span style={{ fontFamily: "ui-monospace" }}>https://{selectedIcao.toLowerCase()}-xxx.vercel.app</span> (yours will be shown in Vercel Project → Domains)
+        </footer>
       </div>
     </main>
   );
