@@ -1,45 +1,35 @@
 // app/airports.ts
+
 export type Runway = {
-  id: string;        // "34L"
-  magHdg: number;    // 340 (MAG)
+  id: string;   // "34R" etc
+  mag: number;  // magnetic heading
 };
 
 export type Airport = {
   icao: string;
-  iata: string;
-  name: string;
-  city: string;
-  runways?: Runway[];
+  tz: string;       // IANA time zone, e.g. "Asia/Tokyo"
+  runways: Runway[];
 };
 
-export const AIRPORTS: Airport[] = [
+export const airports: Airport[] = [
   {
     icao: "RJTT",
-    iata: "HND",
-    name: "Tokyo Haneda",
-    city: "Tokyo",
+    tz: "Asia/Tokyo",
     runways: [
-      { id: "04", magHdg: 040 },
-      { id: "22", magHdg: 220 },
-      { id: "05", magHdg: 050 },
-      { id: "23", magHdg: 230 },
-      { id: "16L", magHdg: 160 },
-      { id: "34R", magHdg: 340 },
-      { id: "16R", magHdg: 160 },
-      { id: "34L", magHdg: 340 },
+      { id: "04", mag: 44 },
+      { id: "16L", mag: 164 },
+      { id: "16R", mag: 164 },
+      { id: "22", mag: 224 },
+      { id: "34L", mag: 344 },
+      { id: "34R", mag: 344 },
     ],
   },
-  {
-    icao: "RJAA",
-    iata: "NRT",
-    name: "Narita International",
-    city: "Narita",
-    runways: [
-      { id: "16R", magHdg: 160 },
-      { id: "34L", magHdg: 340 },
-      { id: "16L", magHdg: 160 },
-      { id: "34R", magHdg: 340 },
-    ],
-  },
-  // 既存の空港も必要に応じて runways を追加
+
+  // 例：いくつか追加（必要な分だけ増やしてOK）
+  { icao: "ROAH", tz: "Asia/Tokyo", runways: [] },         // OKA
+  { icao: "RCTP", tz: "Asia/Taipei", runways: [] },        // TPE
+  { icao: "RJAA", tz: "Asia/Tokyo", runways: [] },         // NRT
+  { icao: "VHHH", tz: "Asia/Hong_Kong", runways: [] },     // HKG
+  { icao: "KJFK", tz: "America/New_York", runways: [] },   // DSTあり
+  { icao: "KLAX", tz: "America/Los_Angeles", runways: [] },// DSTあり
 ];
