@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useRef, useState } from "react";
+import React, { useEffect, useMemo, useRef, useState } from "react";
 import { airports } from "./airports";
 import { judgeDispatch } from "./lib/wxJudge";
 import type { RwySurface, ApproachCat } from "./lib/limits";
@@ -63,13 +63,20 @@ function sortReasons(reasons: string[]) {
   return [...reasons].sort((a, b) => rankReason(a) - rankReason(b));
 }
 
-// --- UI helpers ---
+// --- UI theme helpers ---
 function decisionTheme(v: "GREEN" | "AMBER" | "RED") {
-  if (v === "GREEN") return { accent: "#16a34a", bg: "#052e16", soft: "rgba(22,163,74,0.10)" };
-  if (v === "AMBER") return { accent: "#f59e0b", bg: "#2b1d00", soft: "rgba(245,158,11,0.12)" };
-  return { accent: "#ef4444", bg: "#2b0b0e", soft: "rgba(239,68,68,0.12)" };
+  if (v === "GREEN") return { accent: "#16a34a", soft: "rgba(22,163,74,0.10)" };
+  if (v === "AMBER") return { accent: "#f59e0b", soft: "rgba(245,158,11,0.12)" };
+  return { accent: "#ef4444", soft: "rgba(239,68,68,0.12)" };
 }
-function Pill({ children, tone = "neutral" }: { children: React.ReactNode; tone?: "neutral" | "danger" | "warn" | "ok" }) {
+
+function Pill({
+  children,
+  tone = "neutral",
+}: {
+  children: React.ReactNode;
+  tone?: "neutral" | "danger" | "warn" | "ok";
+}) {
   const style =
     tone === "danger"
       ? { background: "rgba(239,68,68,0.12)", border: "1px solid rgba(239,68,68,0.30)", color: "#ef4444" }
@@ -80,11 +87,23 @@ function Pill({ children, tone = "neutral" }: { children: React.ReactNode; tone?
       : { background: "rgba(148,163,184,0.10)", border: "1px solid rgba(148,163,184,0.25)", color: "#cbd5e1" };
 
   return (
-    <span style={{ display: "inline-flex", alignItems: "center", gap: 6, padding: "5px 10px", borderRadius: 999, fontSize: 12, fontWeight: 700, ...style }}>
+    <span
+      style={{
+        display: "inline-flex",
+        alignItems: "center",
+        gap: 6,
+        padding: "5px 10px",
+        borderRadius: 999,
+        fontSize: 12,
+        fontWeight: 800,
+        ...style,
+      }}
+    >
       {children}
     </span>
   );
 }
+
 function Card({ title, children }: { title: string; children: React.ReactNode }) {
   return (
     <section className="card">
@@ -93,11 +112,12 @@ function Card({ title, children }: { title: string; children: React.ReactNode })
     </section>
   );
 }
+
 function ProgressBar({ value, limit, accent }: { value: number; limit: number; accent: string }) {
   const pct = clamp(Math.round((value / Math.max(1, limit)) * 100));
   const warn = pct >= 80 && pct < 100;
   const bad = pct >= 100;
-  const bar = bad ? "rgba(239,68,68,0.90)" : warn ? "rgba(245,158,11,0.90)" : accent;
+  const bar = bad ? "rgba(239,68,68,0.92)" : warn ? "rgba(245,158,11,0.92)" : accent;
 
   return (
     <div className="barWrap">
@@ -105,6 +125,7 @@ function ProgressBar({ value, limit, accent }: { value: number; limit: number; a
     </div>
   );
 }
+
 function TAFTag({ type }: { type: string }) {
   const t = type.toUpperCase();
   const tone =
@@ -114,7 +135,47 @@ function TAFTag({ type }: { type: string }) {
   return <Pill tone={tone as any}>{type}</Pill>;
 }
 
+/** ② 理由ハイライト（重要語句を太字＆色で強調） */
+function highlightReason(text: string) {
+  const re =
+    /(TEMPO|PROB30|PROB40|PROB|FM|BECMG|TSRA|TS|CB|TAILWIND|CROSSWIND|LIM|LIMIT|HIGH|EXCEED|>|≤|>=|<=|\d+|\bKT\b)/gi;
+
+  const parts = text.split(re);
+  return parts.map((p, i) => {
+    if (!p) return null;
+    const u = p.toUpperCase();
+
+    const isDanger = ["TEMPO", "TS", "TSRA", "CB", "EXCEED", ">"].includes(u);
+    const isWarn = ["PROB", "PROB30", "PROB40", "HIGH"].includes(u);
+    const isInfo = ["FM", "BECMG", "TAILWIND", "CROSSWIND", "LIM", "LIMIT", "KT", "<=", ">=", "≤"].includes(u);
+    const isNumber = /^\d+$/.test(u);
+
+    if (isDanger || isWarn || isInfo || isNumber) {
+      const color = isDanger ? "#ef4444" : isWarn ? "#f59e0b" : "#e5e7eb";
+      const bg = isDanger ? "rgba(239,68,68,0.10)" : isWarn ? "rgba(245,158,11,0.10)" : "rgba(148,163,184,0.08)";
+      return (
+        <strong
+          key={i}
+          style={{
+            color,
+            background: bg,
+            padding: "1px 6px",
+            borderRadius: 10,
+            border: "1px solid rgba(148,163,184,0.12)",
+            fontWeight: 1000,
+          }}
+        >
+          {p}
+        </strong>
+      );
+    }
+
+    return <span key={i}>{p}</span>;
+  });
+}
+
 export default function Home() {
+  // 時刻（UTC＋空港ローカル）秒更新
   const [nowMs, setNowMs] = useState<number>(() => Date.now());
   useEffect(() => {
     const id = setInterval(() => setNowMs(Date.now()), 1000);
@@ -148,7 +209,7 @@ export default function Home() {
   const utcNow = useMemo(() => fmtZoned(nowMs, "UTC"), [nowMs]);
   const aptLocalNow = useMemo(() => fmtZoned(nowMs, airport?.tz || "UTC"), [nowMs, airport?.tz]);
 
-  // RWY 推奨
+  // RWY 推奨（風が無い場合も並ぶが、風があると“意味のある順”になる）
   const recommendedRunways = useMemo(() => {
     if (!runways.length) return [];
     const wind = wx?.wind;
@@ -182,6 +243,7 @@ export default function Home() {
     return runways.find((r) => r.id === rwyId) ?? runways[0];
   }, [runways, rwyId]);
 
+  // ICAOが変わったら推奨1位を選択
   useEffect(() => {
     if (!runways.length) return;
     const best = recommendedRunways[0]?.r ?? runways[0];
@@ -200,10 +262,10 @@ export default function Home() {
     setIcaoQuery(code);
   }
 
-  async function fetchWeather() {
+  async function fetchWeather(forIcao: string) {
     setLoading(true);
     try {
-      const res = await fetch(`/api/weather?icao=${icao}`);
+      const res = await fetch(`/api/weather?icao=${forIcao}`);
       const data = await res.json();
       setWx(data);
       return data;
@@ -212,9 +274,8 @@ export default function Home() {
     }
   }
 
-  async function run() {
-    const data = wx ?? (await fetchWeather());
-    if (!data?.wind || !selectedRwy) return;
+  function computeJudge(data: { metar: string | null; taf: string | null; wind: Wind | null }) {
+    if (!data?.wind || !selectedRwy) return null;
 
     const out = judgeDispatch({
       wind: data.wind,
@@ -226,8 +287,41 @@ export default function Home() {
     });
 
     out.reason = sortReasons(out.reason ?? []);
-    setJudge(out);
+    return out;
   }
+
+  // ✅ ① 自動再判定（入力変更で勝手に更新）
+  // - ICAO変更: WXを取り直して再判定
+  // - RWY/Surface/CAT/Autoland変更: 手元のWXで即再判定
+  // - 連続操作で暴れないように軽いデバウンス（250ms）
+  const autoTimer = useRef<any>(null);
+  const lastFetchIcao = useRef<string>("");
+
+  useEffect(() => {
+    if (autoTimer.current) clearTimeout(autoTimer.current);
+
+    autoTimer.current = setTimeout(async () => {
+      // 1) ICAOが変わった直後はWX再取得（同一ICAOでの二重fetch防止）
+      if (icao && lastFetchIcao.current !== icao) {
+        lastFetchIcao.current = icao;
+        const data = await fetchWeather(icao);
+        const out = computeJudge(data);
+        if (out) setJudge(out);
+        return;
+      }
+
+      // 2) ICAO同じなら、今あるWXで再判定
+      if (wx) {
+        const out = computeJudge(wx);
+        if (out) setJudge(out);
+      }
+    }, 250);
+
+    return () => {
+      if (autoTimer.current) clearTimeout(autoTimer.current);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [icao, rwyId, surface, approachCat, autoland, wx?.wind?.dir, wx?.wind?.spd, wx?.wind?.gust, wx?.taf, wx?.metar]);
 
   function setBestRwy() {
     const best = recommendedRunways[0]?.r;
@@ -236,7 +330,6 @@ export default function Home() {
 
   const decision: "GREEN" | "AMBER" | "RED" = judge?.decision ?? "GREEN";
   const theme = decisionTheme(decision);
-
   const pdfEmphasis = decision === "RED" || decision === "AMBER";
 
   async function openPdf() {
@@ -276,16 +369,12 @@ export default function Home() {
   const limTail = (judge?.limits?.maxTailwind ?? 10) as number;
   const limCross = (judge?.limits?.maxCrosswind ?? 35) as number;
 
-  const windText = wx?.wind
-    ? `${wx.wind.dir}° / ${wx.wind.spd}${wx.wind.gust ? `G${wx.wind.gust}` : ""} kt`
-    : "—";
+  const windText = wx?.wind ? `${wx.wind.dir}° / ${wx.wind.spd}${wx.wind.gust ? `G${wx.wind.gust}` : ""} kt` : "—";
 
   return (
     <main className="app">
       <style jsx global>{`
-        :root {
-          color-scheme: dark;
-        }
+        :root { color-scheme: dark; }
         body {
           margin: 0;
           background: radial-gradient(1200px 800px at 20% 0%, rgba(59,130,246,0.16), transparent 60%),
@@ -295,61 +384,21 @@ export default function Home() {
         }
       `}</style>
 
-      {/* Mobile対応 */}
       <style jsx>{`
-        .app {
-          padding: 18px;
-          font-family: system-ui, -apple-system, Segoe UI, sans-serif;
-        }
-        .topbar {
-          display: flex;
-          align-items: flex-end;
-          justify-content: space-between;
-          gap: 12px;
-        }
-        .grid {
-          display: grid;
-          grid-template-columns: 340px 1fr 420px;
-          gap: 14px;
-          margin-top: 14px;
-        }
+        .app { padding: 18px; font-family: system-ui, -apple-system, Segoe UI, sans-serif; }
+        .topbar { display: flex; align-items: flex-end; justify-content: space-between; gap: 12px; }
+        .grid { display: grid; grid-template-columns: 340px 1fr 420px; gap: 14px; margin-top: 14px; }
         @media (max-width: 980px) {
-          .grid {
-            grid-template-columns: 1fr;
-          }
-          .topbar {
-            flex-direction: column;
-            align-items: stretch;
-          }
-          .actions {
-            width: 100%;
-            flex-wrap: wrap;
-          }
-          .actions button {
-            flex: 1;
-            min-width: 160px;
-          }
+          .grid { grid-template-columns: 1fr; }
+          .topbar { flex-direction: column; align-items: stretch; }
+          .actions { width: 100%; flex-wrap: wrap; }
+          .actions button { flex: 1; min-width: 160px; }
         }
-        .brand {
-          display: flex;
-          flex-direction: column;
-          gap: 6px;
-        }
-        .title {
-          font-size: 20px;
-          font-weight: 900;
-          letter-spacing: 0.2px;
-        }
-        .subtitle {
-          font-size: 12px;
-          opacity: 0.7;
-        }
-        .timeRow {
-          margin-top: 10px;
-          display: flex;
-          gap: 10px;
-          flex-wrap: wrap;
-        }
+        .brand { display: flex; flex-direction: column; gap: 6px; }
+        .title { font-size: 20px; font-weight: 950; letter-spacing: 0.2px; }
+        .subtitle { font-size: 12px; opacity: 0.7; }
+
+        .timeRow { margin-top: 10px; display: flex; gap: 10px; flex-wrap: wrap; }
         .timeChip {
           border: 1px solid rgba(148,163,184,0.18);
           background: rgba(15,23,42,0.55);
@@ -357,29 +406,18 @@ export default function Home() {
           padding: 10px 12px;
           backdrop-filter: blur(8px);
         }
-        .timeLabel {
-          font-size: 11px;
-          opacity: 0.7;
-        }
-        .timeValue {
-          font-size: 13px;
-          font-weight: 900;
-          margin-top: 2px;
-        }
-        .actions {
-          display: flex;
-          gap: 10px;
-        }
-        button {
-          cursor: pointer;
-        }
+        .timeLabel { font-size: 11px; opacity: 0.7; }
+        .timeValue { font-size: 13px; font-weight: 950; margin-top: 2px; }
+
+        .actions { display: flex; gap: 10px; }
+        button { cursor: pointer; }
         .btn {
           padding: 11px 12px;
           border-radius: 14px;
           border: 1px solid rgba(148,163,184,0.20);
           background: rgba(15,23,42,0.55);
           color: #e5e7eb;
-          font-weight: 800;
+          font-weight: 850;
           backdrop-filter: blur(8px);
         }
         .btnPrimary {
@@ -391,10 +429,8 @@ export default function Home() {
           background: linear-gradient(180deg, rgba(239,68,68,0.18), rgba(15,23,42,0.55));
           box-shadow: 0 10px 30px rgba(239,68,68,0.20);
         }
-        .btn:disabled {
-          opacity: 0.5;
-          cursor: not-allowed;
-        }
+        .btn:disabled { opacity: 0.5; cursor: not-allowed; }
+
         .card {
           border: 1px solid rgba(148,163,184,0.18);
           background: rgba(15,23,42,0.55);
@@ -402,16 +438,9 @@ export default function Home() {
           padding: 14px;
           backdrop-filter: blur(10px);
         }
-        .cardTitle {
-          font-weight: 900;
-          margin-bottom: 10px;
-          letter-spacing: 0.2px;
-        }
-        .label {
-          font-size: 12px;
-          opacity: 0.75;
-          margin-top: 6px;
-        }
+        .cardTitle { font-weight: 950; margin-bottom: 10px; letter-spacing: 0.2px; }
+
+        .label { font-size: 12px; opacity: 0.75; margin-top: 6px; }
         .input, select {
           width: 100%;
           margin-top: 6px;
@@ -422,58 +451,31 @@ export default function Home() {
           color: #e5e7eb;
           outline: none;
         }
-        .candList {
-          display: grid;
-          gap: 6px;
-          max-height: 170px;
-          overflow: auto;
-          padding-bottom: 8px;
-          margin-top: 8px;
-        }
+
+        .candList { display: grid; gap: 6px; max-height: 170px; overflow: auto; padding-bottom: 8px; margin-top: 8px; }
         .candBtn {
-          text-align: left;
-          padding: 9px 10px;
-          border-radius: 14px;
+          text-align: left; padding: 9px 10px; border-radius: 14px;
           border: 1px solid rgba(148,163,184,0.18);
           background: rgba(2,6,23,0.35);
-          color: #e5e7eb;
-          font-weight: 800;
+          color: #e5e7eb; font-weight: 850;
         }
-        .candBtnActive {
-          border: 1px solid rgba(226,232,240,0.22);
-          background: rgba(148,163,184,0.12);
-        }
-        .row {
-          display: flex;
-          gap: 10px;
-          align-items: center;
-        }
-        .rowGrow {
-          flex: 1;
-        }
+        .candBtnActive { border: 1px solid rgba(226,232,240,0.22); background: rgba(148,163,184,0.12); }
+
+        .row { display: flex; gap: 10px; align-items: center; }
+        .rowGrow { flex: 1; }
         .miniBtn {
-          padding: 10px 10px;
-          border-radius: 14px;
+          padding: 10px 10px; border-radius: 14px;
           border: 1px solid rgba(148,163,184,0.20);
           background: rgba(2,6,23,0.35);
-          color: #e5e7eb;
-          font-weight: 900;
+          color: #e5e7eb; font-weight: 950;
         }
-        .kpiGrid {
-          margin-top: 12px;
-          display: grid;
-          grid-template-columns: 1fr 1fr;
-          gap: 12px;
-        }
-        .kpi {
-          border: 1px solid rgba(148,163,184,0.16);
-          background: rgba(2,6,23,0.35);
-          border-radius: 18px;
-          padding: 12px;
-        }
+
+        .kpiGrid { margin-top: 12px; display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+        .kpi { border: 1px solid rgba(148,163,184,0.16); background: rgba(2,6,23,0.35); border-radius: 18px; padding: 12px; }
         .kpiLabel { font-size: 11px; opacity: 0.72; }
         .kpiValue { font-size: 18px; font-weight: 1000; margin-top: 4px; }
         .kpiSub { font-size: 12px; opacity: 0.75; margin-top: 4px; }
+
         .decisionCard {
           border: 1px solid rgba(148,163,184,0.18);
           background: linear-gradient(180deg, ${theme.soft}, rgba(15,23,42,0.55));
@@ -481,91 +483,34 @@ export default function Home() {
           padding: 14px;
           backdrop-filter: blur(10px);
         }
-        .decisionHeader {
-          display: flex;
-          align-items: center;
-          justify-content: space-between;
-          gap: 10px;
-        }
+        .decisionHeader { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
         .badge {
-          display: inline-flex;
-          align-items: center;
-          gap: 10px;
-          padding: 10px 14px;
-          border-radius: 16px;
+          display: inline-flex; align-items: center; gap: 10px;
+          padding: 10px 14px; border-radius: 16px;
           background: rgba(2,6,23,0.45);
           border: 1px solid rgba(148,163,184,0.18);
-          font-weight: 1000;
-          letter-spacing: 0.5px;
-          font-size: 18px;
+          font-weight: 1000; letter-spacing: 0.5px; font-size: 18px;
         }
-        .badgeDot {
-          width: 10px;
-          height: 10px;
-          border-radius: 999px;
-          background: ${theme.accent};
-          box-shadow: 0 0 0 6px rgba(255,255,255,0.02);
-        }
-        .whyBox {
-          margin-top: 12px;
-          border: 1px solid rgba(148,163,184,0.16);
-          background: rgba(2,6,23,0.35);
-          border-radius: 18px;
-          padding: 12px;
-        }
-        .whyItem {
-          font-size: 13px;
-          margin: 7px 0;
-          line-height: 1.35;
-        }
-        .barWrap {
-          height: 10px;
-          border-radius: 999px;
-          background: rgba(148,163,184,0.12);
-          overflow: hidden;
-          margin-top: 6px;
-        }
-        .bar {
-          height: 100%;
-          border-radius: 999px;
-        }
-        pre {
-          white-space: pre-wrap;
-          border: 1px solid rgba(148,163,184,0.16);
-          border-radius: 18px;
-          padding: 12px;
-          background: rgba(2,6,23,0.35);
-          margin: 0;
-        }
-        .tafList {
-          display: grid;
-          gap: 8px;
-          margin-top: 8px;
-        }
-        .tafItem {
-          border: 1px solid rgba(148,163,184,0.16);
-          background: rgba(2,6,23,0.35);
-          border-radius: 18px;
-          padding: 10px;
-        }
-        .tafTop {
-          display: flex;
-          align-items: center;
-          justify-content: space-between;
-          gap: 8px;
-          margin-bottom: 6px;
-        }
-        .muted {
-          opacity: 0.7;
-          font-size: 12px;
-        }
+        .badgeDot { width: 10px; height: 10px; border-radius: 999px; background: ${theme.accent}; box-shadow: 0 0 0 6px rgba(255,255,255,0.02); }
+
+        .whyBox { margin-top: 12px; border: 1px solid rgba(148,163,184,0.16); background: rgba(2,6,23,0.35); border-radius: 18px; padding: 12px; }
+        .whyItem { font-size: 13px; margin: 9px 0; line-height: 1.55; }
+
+        .barWrap { height: 10px; border-radius: 999px; background: rgba(148,163,184,0.12); overflow: hidden; margin-top: 6px; }
+        .bar { height: 100%; border-radius: 999px; }
+
+        pre { white-space: pre-wrap; border: 1px solid rgba(148,163,184,0.16); border-radius: 18px; padding: 12px; background: rgba(2,6,23,0.35); margin: 0; }
+        .tafList { display: grid; gap: 8px; margin-top: 8px; }
+        .tafItem { border: 1px solid rgba(148,163,184,0.16); background: rgba(2,6,23,0.35); border-radius: 18px; padding: 10px; }
+        .tafTop { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-bottom: 6px; }
+        .muted { opacity: 0.7; font-size: 12px; }
       `}</style>
 
       {/* Top bar */}
       <div className="topbar">
         <div className="brand">
           <div className="title">ARI Safety Intelligence</div>
-          <div className="subtitle">Dispatch board UI — fast inputs, loud decision, clean evidence</div>
+          <div className="subtitle">Auto re-check on input change + highlighted reasons</div>
 
           <div className="timeRow">
             <div className="timeChip">
@@ -582,13 +527,27 @@ export default function Home() {
         </div>
 
         <div className="actions">
-          <button className="btn" onClick={fetchWeather} disabled={loading}>
+          <button className="btn" onClick={() => fetchWeather(icao)} disabled={loading}>
             {loading ? "Loading..." : "Fetch WX"}
           </button>
-          <button className="btn btnPrimary" onClick={run}>
-            Run Dispatch Check
+          {/* 自動再判定が主役なので、手動ボタンは “保険” として残す */}
+          <button
+            className="btn btnPrimary"
+            onClick={async () => {
+              const data = wx ?? (await fetchWeather(icao));
+              if (!data) return;
+              const out = computeJudge(data);
+              if (out) setJudge(out);
+            }}
+          >
+            Re-check Now
           </button>
-          <button className={`btn ${pdfEmphasis ? "btnDanger" : ""}`} onClick={openPdf} disabled={!judge} title={pdfEmphasis ? "Recommended to export (AMBER/RED)" : "Export PDF"}>
+          <button
+            className={`btn ${pdfEmphasis ? "btnDanger" : ""}`}
+            onClick={openPdf}
+            disabled={!judge}
+            title={pdfEmphasis ? "Recommended to export (AMBER/RED)" : "Export PDF"}
+          >
             PDF Release
           </button>
         </div>
@@ -665,17 +624,14 @@ export default function Home() {
           <div className="row" style={{ marginTop: 10, justifyContent: "space-between" }}>
             <label className="row" style={{ gap: 10 }}>
               <input type="checkbox" checked={autoland} onChange={(e) => setAutoland(e.target.checked)} />
-              <span style={{ fontSize: 13, fontWeight: 900 }}>Autoland</span>
+              <span style={{ fontSize: 13, fontWeight: 950 }}>Autoland</span>
             </label>
 
-            <Pill tone={surface === "DRY" ? "ok" : surface === "WET" ? "warn" : "danger"}>
-              {surface}
-            </Pill>
+            <Pill tone={surface === "DRY" ? "ok" : surface === "WET" ? "warn" : "danger"}>{surface}</Pill>
           </div>
 
           <div style={{ marginTop: 12 }} className="muted">
-            AMBER = limit close / forecast risk (PROB, trend)<br />
-            RED = limit exceed / TEMPO TS/CB
+            Auto re-check: ICAO / RWY / Surface / CAT / Autoland / WX update
           </div>
         </Card>
 
@@ -707,9 +663,10 @@ export default function Home() {
           <div className="whyBox">
             <div style={{ fontWeight: 1000, marginBottom: 6 }}>Why (top reasons)</div>
 
+            {/* ✅ ② ハイライト表示 */}
             {reasons.slice(0, 4).map((r, i) => (
               <div className="whyItem" key={i}>
-                • {r}
+                • {highlightReason(r)}
               </div>
             ))}
             {!reasons.length && <div className="muted">—</div>}
@@ -739,26 +696,21 @@ export default function Home() {
           <div className="muted">METAR</div>
           <pre style={{ marginTop: 8 }}>{wx?.metar ?? "—"}</pre>
 
-          <div className="muted" style={{ marginTop: 12 }}>
-            TAF (blocks)
-          </div>
-
+          <div className="muted" style={{ marginTop: 12 }}>TAF (blocks)</div>
           <div className="tafList">
             {(judge?.tafRisk?.blocks ?? []).map((b: any, idx: number) => (
               <div className="tafItem" key={idx}>
                 <div className="tafTop">
                   <TAFTag type={b.type} />
-                  <span className="muted">priority {rankReason(b.text ?? b.type)}</span>
+                  <span className="muted">{b.type.toUpperCase() === "TEMPO" ? "highest attention" : ""}</span>
                 </div>
-                <div style={{ fontSize: 13, lineHeight: 1.35 }}>{b.text}</div>
+                <div style={{ fontSize: 13, lineHeight: 1.55 }}>{b.text}</div>
               </div>
             ))}
-            {!judge?.tafRisk?.blocks?.length && <div className="tafItem muted">— (Run Dispatch Check で表示)</div>}
+            {!judge?.tafRisk?.blocks?.length && <div className="tafItem muted">— (auto re-check after WX fetch)</div>}
           </div>
 
-          <div className="muted" style={{ marginTop: 12 }}>
-            Limits used
-          </div>
+          <div className="muted" style={{ marginTop: 12 }}>Limits used</div>
           <pre style={{ marginTop: 8 }}>{judge ? JSON.stringify(judge.limits, null, 2) : "—"}</pre>
         </Card>
       </div>
