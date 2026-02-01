@@ -1,7 +1,7 @@
 "use client";
 
 import { useState } from "react";
-import TafTimeline from "./components/TafTimeline";
+import TafTimeline from "@/app/components/TafTimeline";
 
 type WxResponse = {
   metar: {
@@ -38,7 +38,7 @@ export default function Page() {
 
       const json = await res.json();
       setData(json);
-    } catch (e) {
+    } catch {
       alert("Weather API error");
     } finally {
       setLoading(false);
@@ -49,9 +49,7 @@ export default function Page() {
 
   return (
     <main style={{ padding: 30, fontFamily: "sans-serif" }}>
-      {/* =====================
-          ICAO INPUT
-      ====================== */}
+      {/* ICAO INPUT */}
       <div style={{ marginBottom: 20 }}>
         <input
           placeholder="ICAO (e.g. RJTT / KJFK)"
@@ -73,9 +71,7 @@ export default function Page() {
 
       {data && (
         <>
-          {/* =====================
-              KEY SUMMARY
-          ====================== */}
+          {/* KEY SUMMARY */}
           <h2>Key Summary</h2>
 
           <div style={{ display: "grid", gap: 10, maxWidth: 500 }}>
@@ -98,9 +94,7 @@ export default function Page() {
             </div>
           </div>
 
-          {/* =====================
-              RAW TEXT
-          ====================== */}
+          {/* RAW TEXT */}
           <h2 style={{ marginTop: 30 }}>METAR / TAF</h2>
 
           <div style={{ display: "flex", gap: 20 }}>
@@ -127,9 +121,7 @@ export default function Page() {
             </pre>
           </div>
 
-          {/* =====================
-              REASONS (SERVER ONLY)
-          ====================== */}
+          {/* REASONS */}
           <h3 style={{ marginTop: 30 }}>判定理由（reasons）</h3>
 
           {reasons.length === 0 ? (
@@ -142,9 +134,7 @@ export default function Page() {
             </ul>
           )}
 
-          {/* =====================
-              TAF TIMELINE
-          ====================== */}
+          {/* TAF TIMELINE */}
           <h2 style={{ marginTop: 40 }}>TAF Timeline</h2>
 
           <TafTimeline rawTaf={data.taf ?? ""} />
