@@ -7,8 +7,8 @@ type WxResponse = {
   metar: {
     station_id: string;
     wind: string;
-    visibility: string | null; // meters string (e.g. "9999")
-    altimeter: string | null;  // hPa string (e.g. "1013")
+    visibility: string | null;
+    altimeter: string | null;
     clouds: string[];
     raw_text: string;
   };
@@ -57,7 +57,7 @@ export default function Page() {
         <input
           placeholder="RJTT / KJFK / ROAH"
           value={icao}
-          onChange={(e) => setIcao(e.target.value)}
+          onChange={(e) => setIcao(e.target.value.toUpperCase())}
           style={{ padding: 10, width: 260 }}
         />
         <button onClick={getWeather} style={{ padding: "10px 14px", fontWeight: 700 }}>
@@ -84,7 +84,7 @@ export default function Page() {
               <strong>Visibility:</strong> {data.metar.visibility ?? "—"}
             </div>
             <div>
-              <strong>QNH:</strong> {data.metar.altimeter ?? "—"}
+              <strong>QNH(hPa):</strong> {data.metar.altimeter ?? "—"}
             </div>
             <div>
               <strong>Clouds:</strong> {(data.metar.clouds ?? []).join(", ") || "—"}
