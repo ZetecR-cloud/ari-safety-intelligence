@@ -1,132 +1,109 @@
 import { NextResponse } from "next/server";
 import { judgeWx } from "@/app/lib/wx/wxJudge";
 
-/* =====================================================
-   Visibility parser
-   - ICAO : 9999
-   - FAA  : 10SM / 5SM
-===================================================== */
+type AwMetar = {
+  rawOb?: string;
+  icaoId?: string;
+  wdir?: string;
+  wspd?: string;
+  clouds?: string[];
+};
+
+type AwTaf = {
+  rawTAF?: string;
+};
+
 function parseVisibility(token: string): string | null {
-  // ICAO style
+  // ICAO: 9999 / 8000 etc
   if (/^\d{4}$/.test(token)) return token;
 
-  // FAA style
-  const sm = token.match(/^(\d+)?SM$/);
-  if (sm) {
-    const miles = Number(sm[1] ?? 10);
-    const meters = Math.round(miles * 1609);
-    return meters >= 9999 ? "9999" : String(meters);
-  }
+  // US style: 10SM / 5SM / 1/2SM etc  → 目安として "SM"表記をそのまま返す
+  const sm = token.match(/^(\d+)(SM)$/);
+  if (sm) return `${sm[1]}SM`;
+
+  // 1/2SM など
+  const frac = token.match(/^(\d+)\/(\d+)SM$/);
+  if (frac) return `${frac[1]}/${frac[2]}SM`;
 
   return null;
 }
 
-/* =====================================================
-   QNH parser
-   - Q1013
-   - A3020 (inHg → hPa)
-===================================================== */
-function parseQnh(token: string): string | null {
-  // ICAO
+function parseAltimeter(token: string): string | null {
+  // ICAO QNH: Q1013
   const q = token.match(/^Q(\d{4})$/);
   if (q) return q[1];
 
-  // FAA
+  // FAA altimeter: A3020 (inHg*100) → hPa換算して返す（四捨五入）
   const a = token.match(/^A(\d{4})$/);
   if (a) {
     const inHg = Number(a[1]) / 100;
-    const hpa = Math.round(inHg * 33.8639);
-    return String(hpa);
+    const hPa = Math.round(inHg * 33.8639);
+    return String(hPa);
   }
-
   return null;
 }
 
-/* =====================================================
-   API
-===================================================== */
 export async function GET(req: Request) {
   const { searchParams } = new URL(req.url);
-  const icao = searchParams.get("icao");
+  const icao = searchParams.get("icao")?.trim();
 
   if (!icao) {
-    return NextResponse.json(
-      { error: "ICAO code is required" },
-      { status: 400 }
-    );
+    return NextResponse.json({ error: "ICAO code is required" }, { status: 400 });
   }
 
   const upper = icao.toUpperCase();
 
-  /* -----------------------------
-     Fetch METAR / TAF
-  ----------------------------- */
   const metarURL = `https://aviationweather.gov/api/data/metar?ids=${upper}&format=json`;
   const tafURL = `https://aviationweather.gov/api/data/taf?ids=${upper}&format=json`;
 
   const [metarRes, tafRes] = await Promise.all([
     fetch(metarURL, { cache: "no-store" }),
-    fetch(tafURL, { cache: "no-store" }),
+    fetch(tafURL, { cache: "no-store" })
   ]);
 
-  const metarJson = await metarRes.json();
-  const tafJson = await tafRes.json();
+  const metars = (await metarRes.json()) as AwMetar[];
+  const tafs = (await tafRes.json()) as AwTaf[];
 
-  const metar = metarJson?.[0];
-  const taf = tafJson?.[0];
+  const metar = metars?.[0];
+  const taf = tafs?.[0];
 
   if (!metar?.rawOb) {
-    return NextResponse.json(
-      { error: "METAR not available" },
-      { status: 404 }
-    );
+    return NextResponse.json({ error: "METAR not available" }, { status: 404 });
   }
 
-  /* -----------------------------
-     RAW METAR
-  ----------------------------- */
-  const rawMetar: string = metar.rawOb;
-  const tokens = rawMetar.split(" ");
+  const rawMetar = metar.rawOb;
+  const tokens = rawMetar.split(/\s+/);
 
-  /* -----------------------------
-     Visibility / QNH
-  ----------------------------- */
   let visibility: string | null = null;
-  let qnh: string | null = null;
+  let altimeter: string | null = null;
 
   for (const t of tokens) {
-    if (!visibility) visibility = parseVisibility(t);
-    if (!qnh) qnh = parseQnh(t);
+    if (!visibility) {
+      const v = parseVisibility(t);
+      if (v) visibility = v;
+    }
+    if (!altimeter) {
+      const a = parseAltimeter(t);
+      if (a) altimeter = a;
+    }
   }
 
-  /* -----------------------------
-     Weather judgement
-     (唯一の ceiling 判定元)
-  ----------------------------- */
-  const wx = judgeWx({
-    clouds: metar.clouds ?? [],
-  });
+  // ✅ ceiling判定は wxJudge だけに一本化（ここで勝手に "Ceiling present" を足さない）
+  const wx = judgeWx({ clouds: metar.clouds ?? [] });
 
-  /* -----------------------------
-     Response
-  ----------------------------- */
   return NextResponse.json({
     status: "OK",
     icao: upper,
-
     metar: {
-      station_id: metar.icaoId,
-      wind: metar.wdir + metar.wspd + "KT",
+      station_id: metar.icaoId ?? upper,
+      wind: `${metar.wdir ?? "///"}${metar.wspd ?? "///"}KT`,
       visibility,
-      altimeter: qnh,
+      altimeter,
       clouds: metar.clouds ?? [],
-      raw_text: rawMetar,
+      raw_text: rawMetar
     },
-
     taf: taf?.rawTAF ?? null,
-
     wx_analysis: wx,
-
-    time: new Date().toISOString(),
+    time: new Date().toISOString()
   });
 }
