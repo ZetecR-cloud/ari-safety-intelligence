@@ -1,7 +1,7 @@
 "use client";
 
 import { useMemo, useState } from "react";
-import TafTimeline from "./components/TafTimeline";
+import TafTimeline from "@/components/TafTimeline";
 
 type WxJudgement = {
   level: "GREEN" | "AMBER" | "RED";
