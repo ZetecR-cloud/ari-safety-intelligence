@@ -2,266 +2,322 @@
 
 import React, { useMemo, useState } from "react";
 
-type WeatherResponse = {
+type WxLevel = "GREEN" | "AMBER" | "RED" | "UNKNOWN";
+
+type WxResponse = {
   status?: string;
   icao?: string;
   sources?: string[];
-  metar?: any;
-  taf?: any;
-  wx_analysis?: { level?: string; reasons?: string[] };
-  wxAnalysis?: { level?: string; reasons?: string[] };
+  metar?: {
+    raw?: string;
+    wind?: string;
+    visibility?: string;
+    qnh?: string;
+    clouds?: string[];
+    [k: string]: any;
+  };
+  taf?: string;
+  wx_analysis?: {
+    level?: WxLevel;
+    reasons?: string[];
+    [k: string]: any;
+  };
   time?: string;
   [k: string]: any;
 };
 
-const DEFAULT_ICAO = "RJTT";
-
-// まずは最小の内蔵候補（あとで airports.ts 連携に拡張できます）
-const AIRPORT_PRESETS: Array<{ code: string; name: string; city?: string }> = [
-  { code: "RJTT", name: "Tokyo Haneda", city: "Tokyo" },
-  { code: "RJAA", name: "Narita", city: "Chiba" },
-  { code: "RJBB", name: "Kansai", city: "Osaka" },
-  { code: "RJCC", name: "New Chitose", city: "Sapporo" },
-  { code: "ROAH", name: "Naha", city: "Okinawa" },
-  { code: "RCTP", name: "Taoyuan", city: "Taipei" },
-  { code: "RJNK", name: "Komatsu", city: "Ishikawa" },
-  { code: "RJNT", name: "Toyama", city: "Toyama" },
-];
-
-function normalizeIcao(input: string) {
-  return (input || "").trim().toUpperCase().replace(/[^A-Z0-9]/g, "");
+function levelStyle(level: WxLevel) {
+  switch (level) {
+    case "GREEN":
+      return {
+        badge: "bg-emerald-600 text-white",
+        ring: "ring-emerald-200",
+        title: "GREEN",
+        sub: "通常運航可（監視継続）",
+      };
+    case "AMBER":
+      return {
+        badge: "bg-amber-500 text-white",
+        ring: "ring-amber-200",
+        title: "AMBER",
+        sub: "注意（要監視・条件確認）",
+      };
+    case "RED":
+      return {
+        badge: "bg-red-600 text-white",
+        ring: "ring-red-200",
+        title: "RED",
+        sub: "要判断（PIC/Dispatch Review）",
+      };
+    default:
+      return {
+        badge: "bg-zinc-500 text-white",
+        ring: "ring-zinc-200",
+        title: "UNKNOWN",
+        sub: "判定情報が不足しています",
+      };
+  }
 }
 
-function getWxLevel(data: WeatherResponse | null) {
-  const lvl =
-    data?.wx_analysis?.level ??
-    data?.wxAnalysis?.level ??
-    (typeof data?.["wxLevel"] === "string" ? data["wxLevel"] : undefined);
-  return (lvl || "—").toString().toUpperCase();
+function clsx(...xs: Array<string | false | null | undefined>) {
+  return xs.filter(Boolean).join(" ");
 }
 
-function levelBadgeClass(level: string) {
-  // Tailwind無しでも見栄えするように最低限の class（そのままでも動きます）
-  // Tailwindが入ってるなら効きます。入ってなくても崩れません。
-  if (level === "GREEN") return "bg-green-600";
-  if (level === "AMBER" || level === "YELLOW") return "bg-yellow-500";
-  if (level === "RED") return "bg-red-600";
-  return "bg-gray-600";
+function safeUpper(s: string) {
+  return (s ?? "").trim().toUpperCase();
 }
 
 export default function Page() {
-  const [icaoInput, setIcaoInput] = useState<string>(DEFAULT_ICAO);
+  // ▼あなたのAPIが違う場合ここだけ修正
+  // 例: "/api/weather?icao=" など
+  const API_PATH = "/api/wx?icao=";
+
+  const [query, setQuery] = useState("RJTT");
   const [loading, setLoading] = useState(false);
-  const [errorMsg, setErrorMsg] = useState<string>("");
-  const [data, setData] = useState<WeatherResponse | null>(null);
+  const [err, setErr] = useState<string | null>(null);
+  const [data, setData] = useState<WxResponse | null>(null);
+  const [showRaw, setShowRaw] = useState(false);
 
-  const icao = useMemo(() => normalizeIcao(icaoInput), [icaoInput]);
+  const level: WxLevel = useMemo(() => {
+    const lv = data?.wx_analysis?.level;
+    if (lv === "GREEN" || lv === "AMBER" || lv === "RED") return lv;
+    return data ? "UNKNOWN" : "UNKNOWN";
+  }, [data]);
 
-  const suggestions = useMemo(() => {
-    const q = normalizeIcao(icaoInput);
-    if (!q) return AIRPORT_PRESETS.slice(0, 6);
-    return AIRPORT_PRESETS.filter(
-      (a) =>
-        a.code.includes(q) ||
-        a.name.toLowerCase().includes(q.toLowerCase()) ||
-        (a.city || "").toLowerCase().includes(q.toLowerCase())
-    ).slice(0, 8);
-  }, [icaoInput]);
+  const style = levelStyle(level);
 
-  async function fetchWeather() {
+  async function onFetch() {
+    const q = safeUpper(query);
+    if (!q) return;
+
     setLoading(true);
-    setErrorMsg("");
+    setErr(null);
+
     try {
-      const res = await fetch(`/api/weather?icao=${encodeURIComponent(icao)}`, {
+      const res = await fetch(`${API_PATH}${encodeURIComponent(q)}`, {
         cache: "no-store",
       });
 
-      const json = (await res.json()) as WeatherResponse;
-
       if (!res.ok) {
-        setData(json);
-        setErrorMsg(
-          json?.message ||
-            `API error: ${res.status} ${res.statusText}` ||
-            "API error"
-        );
-        return;
+        const t = await res.text().catch(() => "");
+        throw new Error(`HTTP ${res.status} ${res.statusText}${t ? `: ${t}` : ""}`);
       }
 
+      const json = (await res.json()) as WxResponse;
       setData(json);
     } catch (e: any) {
-      setErrorMsg(e?.message || "Network error");
+      setErr(e?.message ?? "Fetch failed");
+      setData(null);
     } finally {
       setLoading(false);
     }
   }
 
-  const wxLevel = getWxLevel(data);
+  const metarRaw = data?.metar?.raw ?? "";
+  const tafRaw = data?.taf ?? "";
+  const reasons = data?.wx_analysis?.reasons ?? [];
 
   return (
-    <main style={{ maxWidth: 1100, margin: "24px auto", padding: "0 16px" }}>
-      <h1 style={{ fontSize: 44, fontWeight: 800, margin: "8px 0 4px" }}>
-        ARI Safety Intelligence
-      </h1>
-      <div style={{ color: "#444", marginBottom: 18 }}>
-        ICAO入力 → METAR/TAF取得 → WX解析（注意喚起レベル）
-      </div>
+    <div className="min-h-screen bg-zinc-50 text-zinc-900">
+      {/* Header */}
+      <header className="border-b bg-white">
+        <div className="mx-auto max-w-6xl px-4 py-6">
+          <div className="flex flex-col gap-2 sm:flex-row sm:items-end sm:justify-between">
+            <div>
+              <h1 className="text-2xl font-semibold tracking-tight">
+                ARI Safety Intelligence
+              </h1>
+              <p className="text-sm text-zinc-600">
+                ICAO入力 → METAR/TAF取得 → 運航注意喚起（EVA基準の見える化）
+              </p>
+            </div>
 
-      <section
-        style={{
-          display: "flex",
-          gap: 10,
-          alignItems: "flex-end",
-          flexWrap: "wrap",
-          marginBottom: 14,
-        }}
-      >
-        <div style={{ minWidth: 360, flex: "1 1 360px" }}>
-          <div style={{ fontSize: 12, color: "#444", marginBottom: 6 }}>
-            ICAO / IATA / Name
+            {/* Big Status */}
+            <div
+              className={clsx(
+                "rounded-2xl bg-white px-4 py-3 shadow-sm ring-1",
+                style.ring
+              )}
+            >
+              <div className="flex items-center gap-3">
+                <span className={clsx("rounded-full px-3 py-1 text-sm font-semibold", style.badge)}>
+                  WX LEVEL: {style.title}
+                </span>
+                <span className="text-sm text-zinc-600">{style.sub}</span>
+              </div>
+            </div>
           </div>
+        </div>
+      </header>
 
-          <input
-            value={icaoInput}
-            onChange={(e) => setIcaoInput(e.target.value)}
-            placeholder="RJTT"
-            style={{
-              width: "100%",
-              padding: "12px 14px",
-              borderRadius: 12,
-              border: "1px solid #222",
-              background: "#111",
-              color: "#fff",
-              outline: "none",
-              fontSize: 16,
-            }}
-          />
+      {/* Body */}
+      <main className="mx-auto max-w-6xl px-4 py-6">
+        {/* Search bar */}
+        <div className="rounded-2xl bg-white p-4 shadow-sm ring-1 ring-zinc-200">
+          <div className="flex flex-col gap-3 sm:flex-row sm:items-end">
+            <div className="flex-1">
+              <label className="text-xs font-medium text-zinc-700">
+                ICAO / IATA / Name（現段階はICAO推奨）
+              </label>
+              <input
+                value={query}
+                onChange={(e) => setQuery(e.target.value)}
+                placeholder="RJTT"
+                className="mt-1 w-full rounded-xl border border-zinc-300 bg-white px-4 py-3 text-base outline-none focus:border-zinc-400 focus:ring-2 focus:ring-zinc-200"
+              />
+              <p className="mt-1 text-xs text-zinc-500">
+                例: RJTT / RJAA / KJFK / KLAX
+              </p>
+            </div>
 
-          {/* Suggestion box */}
-          <div
-            style={{
-              marginTop: 10,
-              borderRadius: 14,
-              border: "1px solid #222",
-              background: "#111",
-              color: "#fff",
-              overflow: "hidden",
-              maxWidth: 520,
-            }}
-          >
-            {suggestions.map((a) => (
+            <div className="flex gap-2">
               <button
-                key={a.code}
-                onClick={() => setIcaoInput(a.code)}
-                style={{
-                  display: "block",
-                  width: "100%",
-                  textAlign: "left",
-                  padding: "10px 12px",
-                  background: "transparent",
-                  color: "#fff",
-                  border: "none",
-                  cursor: "pointer",
-                }}
+                onClick={onFetch}
+                disabled={loading}
+                className={clsx(
+                  "rounded-xl px-5 py-3 text-sm font-semibold shadow-sm ring-1 ring-zinc-200",
+                  loading ? "bg-zinc-200 text-zinc-600" : "bg-zinc-900 text-white hover:bg-zinc-800"
+                )}
               >
-                <div style={{ fontWeight: 800 }}>
-                  {a.code} — {a.name}
-                </div>
-                <div style={{ opacity: 0.75, fontSize: 12 }}>{a.city || ""}</div>
+                {loading ? "Fetching..." : "Get Weather"}
               </button>
-            ))}
+
+              <button
+                onClick={() => setShowRaw((v) => !v)}
+                className="rounded-xl bg-white px-4 py-3 text-sm font-semibold text-zinc-900 shadow-sm ring-1 ring-zinc-200 hover:bg-zinc-50"
+              >
+                {showRaw ? "Hide Raw" : "Show Raw"}
+              </button>
+            </div>
           </div>
+
+          {err && (
+            <div className="mt-4 rounded-xl border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-800">
+              <div className="font-semibold">Error</div>
+              <div className="mt-1">{err}</div>
+              <div className="mt-2 text-xs text-red-700/80">
+                ※ APIのパス（API_PATH）が合っているかも確認してください
+              </div>
+            </div>
+          )}
         </div>
 
-        <button
-          onClick={fetchWeather}
-          disabled={loading || !icao}
-          style={{
-            padding: "12px 16px",
-            borderRadius: 12,
-            border: "1px solid #222",
-            background: loading ? "#333" : "#111",
-            color: "#fff",
-            fontWeight: 700,
-            cursor: loading ? "not-allowed" : "pointer",
-            height: 46,
-          }}
-        >
-          {loading ? "Loading..." : "Get Weather"}
-        </button>
-      </section>
+        {/* Summary grid */}
+        <div className="mt-6 grid gap-4 lg:grid-cols-3">
+          {/* Key facts */}
+          <section className="rounded-2xl bg-white p-4 shadow-sm ring-1 ring-zinc-200 lg:col-span-1">
+            <h2 className="text-sm font-semibold text-zinc-900">Key Summary</h2>
+            <div className="mt-3 space-y-3 text-sm">
+              <div className="rounded-xl bg-zinc-50 p-3 ring-1 ring-zinc-200">
+                <div className="text-xs text-zinc-500">Station</div>
+                <div className="mt-1 font-semibold">
+                  {data?.icao ? safeUpper(data.icao) : "—"}
+                </div>
+              </div>
 
-      {/* Header row */}
-      <section
-        style={{
-          display: "flex",
-          justifyContent: "space-between",
-          alignItems: "center",
-          gap: 12,
-          borderRadius: 14,
-          border: "1px solid #222",
-          background: "#111",
-          color: "#fff",
-          padding: "14px 16px",
-          marginBottom: 12,
-        }}
-      >
-        <div style={{ fontWeight: 800 }}>
-          {(data?.icao || icao || "----") +
-            (data?.metar?.raw ? ` — ${data?.metar?.raw?.slice(0, 0)}` : "")}
+              <div className="rounded-xl bg-zinc-50 p-3 ring-1 ring-zinc-200">
+                <div className="text-xs text-zinc-500">METAR Wind</div>
+                <div className="mt-1 font-semibold">{data?.metar?.wind ?? "—"}</div>
+              </div>
+
+              <div className="rounded-2xl bg-zinc-50 p-3 ring-1 ring-zinc-200">
+                <div className="text-xs text-zinc-500">Visibility</div>
+                <div className="mt-1 font-semibold">{data?.metar?.visibility ?? "—"}</div>
+              </div>
+
+              <div className="rounded-2xl bg-zinc-50 p-3 ring-1 ring-zinc-200">
+                <div className="text-xs text-zinc-500">QNH</div>
+                <div className="mt-1 font-semibold">{data?.metar?.qnh ?? "—"}</div>
+              </div>
+
+              <div className="rounded-2xl bg-zinc-50 p-3 ring-1 ring-zinc-200">
+                <div className="text-xs text-zinc-500">Clouds</div>
+                <div className="mt-1 font-semibold">
+                  {(data?.metar?.clouds && data.metar.clouds.length > 0)
+                    ? data.metar.clouds.join(", ")
+                    : "—"}
+                </div>
+              </div>
+
+              <div className="text-xs text-zinc-500">
+                Updated: {data?.time ?? "—"}
+              </div>
+            </div>
+          </section>
+
+          {/* METAR / TAF */}
+          <section className="rounded-2xl bg-white p-4 shadow-sm ring-1 ring-zinc-200 lg:col-span-2">
+            <div className="flex items-center justify-between gap-3">
+              <h2 className="text-sm font-semibold text-zinc-900">METAR / TAF</h2>
+              <div className="text-xs text-zinc-500">
+                生データは下に折りたたみ表示できます
+              </div>
+            </div>
+
+            <div className="mt-4 grid gap-4 md:grid-cols-2">
+              <div className="rounded-2xl bg-zinc-50 p-4 ring-1 ring-zinc-200">
+                <div className="mb-2 flex items-center justify-between">
+                  <div className="text-xs font-semibold text-zinc-700">METAR RAW</div>
+                  <span className="text-[11px] text-zinc-500">Monospace</span>
+                </div>
+                <pre className="whitespace-pre-wrap break-words rounded-xl bg-white p-3 text-xs leading-relaxed ring-1 ring-zinc-200">
+                  {metarRaw || "—"}
+                </pre>
+              </div>
+
+              <div className="rounded-2xl bg-zinc-50 p-4 ring-1 ring-zinc-200">
+                <div className="mb-2 flex items-center justify-between">
+                  <div className="text-xs font-semibold text-zinc-700">TAF RAW</div>
+                  <span className="text-[11px] text-zinc-500">Monospace</span>
+                </div>
+                <pre className="whitespace-pre-wrap break-words rounded-xl bg-white p-3 text-xs leading-relaxed ring-1 ring-zinc-200">
+                  {tafRaw || "—"}
+                </pre>
+              </div>
+            </div>
+
+            {/* Reasons */}
+            <div className="mt-4 rounded-2xl bg-white p-4 ring-1 ring-zinc-200">
+              <div className="flex items-center justify-between">
+                <div className="text-sm font-semibold">判定理由（reasons）</div>
+                <span className={clsx("rounded-full px-3 py-1 text-xs font-semibold", style.badge)}>
+                  {style.title}
+                </span>
+              </div>
+
+              {reasons.length === 0 ? (
+                <p className="mt-2 text-sm text-zinc-600">
+                  まだ理由がありません（または解析ロジックが未実装です）。
+                </p>
+              ) : (
+                <ul className="mt-3 space-y-2">
+                  {reasons.map((r, i) => (
+                    <li key={i} className="rounded-xl bg-zinc-50 px-3 py-2 text-sm ring-1 ring-zinc-200">
+                      {r}
+                    </li>
+                  ))}
+                </ul>
+              )}
+            </div>
+
+            {/* Raw JSON */}
+            {showRaw && (
+              <div className="mt-4 rounded-2xl bg-zinc-50 p-4 ring-1 ring-zinc-200">
+                <div className="mb-2 text-xs font-semibold text-zinc-700">RAW JSON</div>
+                <pre className="max-h-[420px] overflow-auto rounded-xl bg-white p-3 text-xs leading-relaxed ring-1 ring-zinc-200">
+                  {JSON.stringify(data ?? {}, null, 2)}
+                </pre>
+              </div>
+            )}
+          </section>
         </div>
 
-        <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
-          <div style={{ opacity: 0.7, fontSize: 12 }}>WX Level</div>
-          <div
-            className={levelBadgeClass(wxLevel)}
-            style={{
-              padding: "6px 12px",
-              borderRadius: 999,
-              color: "#fff",
-              fontWeight: 900,
-              border: "1px solid #222",
-              background:
-                wxLevel === "GREEN"
-                  ? "#16a34a"
-                  : wxLevel === "AMBER" || wxLevel === "YELLOW"
-                  ? "#eab308"
-                  : wxLevel === "RED"
-                  ? "#dc2626"
-                  : "#6b7280",
-            }}
-          >
-            {wxLevel}
-          </div>
+        {/* Footer note */}
+        <div className="mt-6 text-xs text-zinc-500">
+          ※ “WX LEVEL” は現段階では解析ロジックの出力に依存します（GREEN/AMBER/RED）。  
+          ※ 次フェーズで Crosswind / BECMG / TEMPO / CB/TS を理由に自動反映します。
         </div>
-      </section>
-
-      {/* Result box */}
-      <section
-        style={{
-          borderRadius: 14,
-          border: "1px solid #222",
-          background: "#111",
-          color: "#9ef2a6",
-          padding: 16,
-          marginBottom: 14,
-          overflowX: "auto",
-        }}
-      >
-        {errorMsg ? (
-          <div style={{ color: "#ff6b6b", fontWeight: 800, marginBottom: 10 }}>
-            {errorMsg}
-          </div>
-        ) : null}
-
-        <pre style={{ margin: 0, whiteSpace: "pre-wrap" }}>
-          {JSON.stringify(data ?? { status: "idle" }, null, 2)}
-        </pre>
-      </section>
-
-      <div style={{ fontSize: 12, color: "#666" }}>
-        ※ “WX Level” は汎用の注意喚起（デモ）。運航可否判断そのものではありません。
-      </div>
-    </main>
+      </main>
+    </div>
   );
 }
