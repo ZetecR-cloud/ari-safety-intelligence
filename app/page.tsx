@@ -3,229 +3,162 @@
 import { useState } from "react";
 
 /* ===============================
-   Ceiling utilities (ICAO)
+   Ceiling (ICAO official)
 ================================ */
 
 function extractCeilingFt(clouds?: string[]) {
-  if (!clouds || clouds.length === 0) return null;
+  if (!clouds) return null;
 
   let ceiling: number | null = null;
 
-  for (const layer of clouds) {
-    const match = layer.match(/^(BKN|OVC|VV)(\d{3})/);
-    if (!match) continue;
+  for (const c of clouds) {
+    const m = c.match(/^(BKN|OVC|VV)(\d{3})/);
+    if (!m) continue;
 
-    const ft = parseInt(match[2], 10) * 100;
-    if (ceiling === null || ft < ceiling) {
-      ceiling = ft;
-    }
+    const ft = parseInt(m[2], 10) * 100;
+    if (ceiling === null || ft < ceiling) ceiling = ft;
   }
 
   return ceiling;
 }
 
 /* ===============================
-   TAF timeline builder
+   TAF Timeline
 ================================ */
 
-function buildTafTimeline(rawTaf: string) {
-  if (!rawTaf) return [];
+function buildTafTimeline(raw: string) {
+  if (!raw) return [];
 
-  const tokens = rawTaf.split(/\s+/);
-  const timeline: any[] = [];
+  const t = raw.split(/\s+/);
+  const result: any[] = [];
 
-  // BASE is always present
-  timeline.push({
+  // ✅ BASE is ALWAYS present
+  result.push({
     type: "BASE",
     label: "BASE",
+    period: null,
   });
 
-  let i = 0;
-
-  while (i < tokens.length) {
-    const t = tokens[i];
-
-    if (t === "BECMG") {
-      timeline.push({
+  for (let i = 0; i < t.length; i++) {
+    if (t[i] === "BECMG") {
+      result.push({
         type: "BECMG",
         label: "BECMG",
-        period: tokens[i + 1] || "",
+        period: t[i + 1],
       });
-      i += 2;
-      continue;
     }
 
-    if (t === "TEMPO") {
-      timeline.push({
+    if (t[i] === "TEMPO") {
+      result.push({
         type: "TEMPO",
         label: "TEMPO",
-        period: tokens[i + 1] || "",
+        period: t[i + 1],
       });
-      i += 2;
-      continue;
     }
 
-    if (t.startsWith("FM")) {
-      timeline.push({
+    if (t[i].startsWith("FM")) {
+      result.push({
         type: "FM",
-        label: t,
+        label: t[i],
+        period: null,
       });
-      i += 1;
-      continue;
     }
-
-    i++;
   }
 
-  return timeline;
+  return result;
 }
 
 /* ===============================
-   Main Page
+   PAGE
 ================================ */
 
 export default function Page() {
   const [icao, setIcao] = useState("");
   const [data, setData] = useState<any>(null);
   const [loading, setLoading] = useState(false);
-  const [showRaw, setShowRaw] = useState(false);
 
   async function getWeather() {
     if (!icao || loading) return;
 
     setLoading(true);
-    setShowRaw(false);
 
-    try {
-      const res = await fetch(`/api/weather?icao=${icao}`);
-      const json = await res.json();
-      setData(json);
-    } catch (e) {
-      alert("Weather fetch failed");
-    } finally {
-      setLoading(false);
+    const res = await fetch(`/api/weather?icao=${icao}`);
+    const json = await res.json();
+
+    /* 🔥🔥🔥 完全遮断 */
+    if (json?.wx_analysis?.reasons) {
+      json.wx_analysis.reasons = [];
     }
+
+    setData(json);
+    setLoading(false);
   }
 
-  /* ===============================
-     Derived values
-  ================================ */
+  if (!data) {
+    return (
+      <main style={{ padding: 30 }}>
+        <input
+          placeholder="ICAO"
+          value={icao}
+          onChange={(e) => setIcao(e.target.value.toUpperCase())}
+        />
+        <button onClick={getWeather}>Get Weather</button>
+      </main>
+    );
+  }
 
   const clouds = data?.metar?.clouds ?? [];
   const ceilingFt = extractCeilingFt(clouds);
 
-  // server reasons filter
-  const serverReasonsRaw = data?.wx_analysis?.reasons ?? [];
-  const serverReasons = serverReasonsRaw.filter(
-    (r: string) => !r.toLowerCase().includes("ceiling")
-  );
-
-  const reasons: string[] = [...serverReasons];
+  const reasons: string[] = [];
 
   if (ceilingFt !== null && ceilingFt < 3000) {
     reasons.push(`Ceiling present (<3000ft): ${ceilingFt}ft`);
   }
 
-  const tafRaw = data?.taf?.raw_text ?? "";
-  const tafTimeline = buildTafTimeline(tafRaw);
-
-  /* ===============================
-     UI
-  ================================ */
+  const tafTimeline = buildTafTimeline(data?.taf?.raw_text ?? "");
 
   return (
-    <main style={{ padding: 24, fontFamily: "sans-serif" }}>
+    <main style={{ padding: 30, fontFamily: "sans-serif" }}>
       <h1>ARI5 Weather</h1>
 
-      {/* ICAO input */}
-      <div style={{ marginBottom: 16 }}>
-        <input
-          placeholder="ICAO (e.g. ROAH)"
-          value={icao}
-          onChange={(e) => setIcao(e.target.value.toUpperCase())}
-          style={{ padding: 8, width: 160 }}
-        />
-        <button
-          onClick={getWeather}
-          style={{ marginLeft: 8, padding: "8px 16px" }}
-        >
-          {loading ? "Loading..." : "Get Weather"}
-        </button>
-
-        <button
-          onClick={() => setShowRaw((v) => !v)}
-          style={{ marginLeft: 8, padding: "8px 16px" }}
-        >
-          Show Raw
-        </button>
+      <div>
+        <strong>Station:</strong> {data.metar.station_id}
+      </div>
+      <div>
+        <strong>Clouds:</strong> {clouds.join(", ")}
       </div>
 
-      {/* Key summary */}
-      {data && (
-        <>
-          <h2>Key Summary</h2>
+      <h3>判定理由（AMBER）</h3>
 
-          <div style={{ display: "grid", gridTemplateColumns: "repeat(2,1fr)", gap: 12 }}>
-            <div>Station: {data?.metar?.station_id}</div>
-            <div>Wind: {data?.metar?.wind}</div>
-            <div>Visibility: {data?.metar?.visibility}</div>
-            <div>QNH: {data?.metar?.altimeter}</div>
-            <div>Clouds: {clouds.join(", ")}</div>
-            <div>WX: {data?.metar?.wx_string}</div>
-          </div>
-
-          {/* Reasons */}
-          <h3 style={{ marginTop: 24 }}>判定理由 / AMBER</h3>
-
-          {reasons.length === 0 ? (
-            <div>—</div>
-          ) : (
-            <ul>
-              {reasons.map((r, i) => (
-                <li key={i}>{r}</li>
-              ))}
-            </ul>
-          )}
-
-          {/* TAF */}
-          <h2 style={{ marginTop: 32 }}>TAF Timeline</h2>
-
-          <div style={{ display: "flex", gap: 12 }}>
-            {tafTimeline.map((p, i) => (
-              <div
-                key={i}
-                style={{
-                  border: "1px solid #ccc",
-                  padding: 12,
-                  borderRadius: 6,
-                  minWidth: 90,
-                }}
-              >
-                <strong>{p.label}</strong>
-                {p.period && <div>{p.period}</div>}
-              </div>
-            ))}
-          </div>
-        </>
+      {reasons.length === 0 ? (
+        <div>—</div>
+      ) : (
+        <ul>
+          {reasons.map((r, i) => (
+            <li key={i}>{r}</li>
+          ))}
+        </ul>
       )}
 
-      {/* Raw JSON */}
-      {showRaw && (
-        <pre
-          style={{
-            marginTop: 24,
-            maxHeight: 400,
-            overflow: "auto",
-            background: "#111",
-            color: "#0f0",
-            padding: 12,
-            fontSize: 12,
-          }}
-        >
-          {JSON.stringify(data, null, 2).slice(0, 20000)}
-        </pre>
-      )}
+      <h2 style={{ marginTop: 30 }}>TAF Timeline</h2>
+
+      <div style={{ display: "flex", gap: 12 }}>
+        {tafTimeline.map((p, i) => (
+          <div
+            key={i}
+            style={{
+              border: "1px solid #aaa",
+              padding: 12,
+              borderRadius: 6,
+              minWidth: 90,
+            }}
+          >
+            <strong>{p.label}</strong>
+            {p.period && <div>{p.period}</div>}
+          </div>
+        ))}
+      </div>
     </main>
   );
 }
-
