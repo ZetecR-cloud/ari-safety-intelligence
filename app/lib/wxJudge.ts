@@ -10,9 +10,8 @@ export function judgeWx(input: { clouds?: string[] }): WxJudgement {
   const reasons: string[] = [];
   const clouds: string[] = input?.clouds ?? [];
 
-  // ICAO ceiling definition:
+  // ICAO ceiling definition (operational simplification):
   // ceiling = lowest layer of BKN/OVC/VV
-  // (common operational rule: ceiling present if < 3000 ft)
   let ceilingFt: number | null = null;
 
   for (const layer of clouds) {
@@ -25,14 +24,13 @@ export function judgeWx(input: { clouds?: string[] }): WxJudgement {
     }
   }
 
-  // Level logic (simple + robust)
-  // GREEN default
-  let level: WxJudgement["level"] = "GREEN";
-
+  // Example policy:
+  // - AMBER if ceiling < 3000ft (you can tighten to RED by your company rule)
   if (ceilingFt !== null && ceilingFt < 3000) {
-    level = "AMBER";
     reasons.push(`Ceiling present (<3000ft): ${ceilingFt}ft`);
   }
+
+  const level: WxJudgement["level"] = reasons.length ? "AMBER" : "GREEN";
 
   return { level, reasons, ceilingFt };
 }
