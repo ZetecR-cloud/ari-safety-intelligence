@@ -1,6 +1,67 @@
 // app/api/weather/route.ts
+
 import { NextResponse } from "next/server";
 import { judgeWx } from "@/app/lib/wx/wxJudge";
+
+/**
+ * Visibility parser
+ * - ICAO: 9999 / 8000 etc (meters)
+ * - US METAR: 10SM / 5SM / 1/2SM / 2 1/2SM (we support 1/2SM style without space)
+ */
+function parseVisibility(token: string): string | null {
+  // ICAO style: 9999 / 8000 etc
+  if (/^\d{4}$/.test(token)) return token;
+
+  // US style: e.g. 10SM, 5SM, 1/2SM, 2SM
+  const sm = token.match(/^(\d+)(SM)$/);
+  if (sm) {
+    const miles = Number(sm[1]);
+    if (!Number.isFinite(miles)) return null;
+    const meters = Math.round(miles * 1609.344);
+    return String(meters);
+  }
+
+  // Fractional: 1/2SM
+  const frac = token.match(/^(\d+)\/(\d+)SM$/);
+  if (frac) {
+    const num = Number(frac[1]);
+    const den = Number(frac[2]);
+    if (!Number.isFinite(num) || !Number.isFinite(den) || den === 0) return null;
+    const miles = num / den;
+    const meters = Math.round(miles * 1609.344);
+    return String(meters);
+  }
+
+  // "P6SM" (>=6SM) sometimes appears
+  const p = token.match(/^P(\d+)SM$/);
+  if (p) {
+    const miles = Number(p[1]);
+    if (!Number.isFinite(miles)) return null;
+    const meters = Math.round(miles * 1609.344);
+    return String(meters);
+  }
+
+  return null;
+}
+
+/**
+ * Altimeter / QNH parser
+ * - ICAO: Q1013 -> "1013"
+ * - FAA : A3020 -> convert inHg->hPa (rounded)
+ */
+function parseAltimeter(token: string): string | null {
+  const q = token.match(/^Q(\d{4})$/);
+  if (q) return q[1];
+
+  const a = token.match(/^A(\d{4})$/);
+  if (a) {
+    const inHg = Number(a[1]) / 100;
+    const hPa = Math.round(inHg * 33.8639);
+    return String(hPa);
+  }
+
+  return null;
+}
 
 type AwMetar = {
   rawOb: string;
@@ -11,54 +72,18 @@ type AwMetar = {
 };
 
 type AwTaf = {
-  rawTAF: string;
+  rawTAF?: string;
 };
-
-function parseVisibility(token: string): string | null {
-  // ICAO style: 9999 / 8000 / 3000 etc
-  if (/^\d{4}$/.test(token)) return token;
-
-  // FAA style: 10SM / 5SM / 1SM etc
-  // (no fractions handled here; keep robust)
-  const sm = token.match(/^(\d+)\s*SM$/i);
-  if (sm) {
-    const miles = Number(sm[1]);
-    if (Number.isFinite(miles)) {
-      const meters = Math.round(miles * 1609.344);
-      // cap like ICAO "9999" meaning >=10km
-      return meters >= 9999 ? "9999" : String(meters);
-    }
-  }
-
-  return null;
-}
-
-function parseAltimeter(token: string): string | null {
-  // ICAO QNH: Q1013
-  const q = token.match(/^Q(\d{4})$/);
-  if (q) return q[1]; // hPa
-
-  // FAA altimeter: A3020 (inHg*100)
-  const a = token.match(/^A(\d{4})$/);
-  if (a) {
-    const inHg = Number(a[1]) / 100;
-    if (!Number.isFinite(inHg)) return null;
-    const hPa = Math.round(inHg * 33.8639);
-    return String(hPa);
-  }
-
-  return null;
-}
 
 export async function GET(req: Request) {
   const { searchParams } = new URL(req.url);
-  const icaoRaw = (searchParams.get("icao") ?? "").trim();
+  const icao = searchParams.get("icao")?.trim();
 
-  if (!icaoRaw) {
+  if (!icao) {
     return NextResponse.json({ error: "ICAO code is required" }, { status: 400 });
   }
 
-  const upper = icaoRaw.toUpperCase();
+  const upper = icao.toUpperCase();
 
   const metarURL = `https://aviationweather.gov/api/data/metar?ids=${upper}&format=json`;
   const tafURL = `https://aviationweather.gov/api/data/taf?ids=${upper}&format=json`;
@@ -72,6 +97,7 @@ export async function GET(req: Request) {
   const tafs = (await tafRes.json()) as AwTaf[];
 
   const metar = metars?.[0];
+  const taf = tafs?.[0];
 
   if (!metar?.rawOb) {
     return NextResponse.json({ error: "METAR not available" }, { status: 404 });
@@ -84,14 +110,8 @@ export async function GET(req: Request) {
   let altimeter: string | null = null;
 
   for (const t of tokens) {
-    if (!visibility) {
-      const v = parseVisibility(t);
-      if (v) visibility = v;
-    }
-    if (!altimeter) {
-      const a = parseAltimeter(t);
-      if (a) altimeter = a;
-    }
+    if (!visibility) visibility = parseVisibility(t);
+    if (!altimeter) altimeter = parseAltimeter(t);
   }
 
   const wx = judgeWx({ clouds: metar.clouds ?? [] });
@@ -107,7 +127,7 @@ export async function GET(req: Request) {
       clouds: metar.clouds ?? [],
       raw_text: rawMetar
     },
-    taf: tafs?.[0]?.rawTAF ?? null,
+    taf: taf?.rawTAF ?? null,
     wx_analysis: wx,
     time: new Date().toISOString()
   });
