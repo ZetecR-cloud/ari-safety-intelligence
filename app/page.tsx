@@ -3,92 +3,134 @@
 import { useState } from "react";
 import TafTimeline from "./components/TafTimeline";
 
-/* ===============================
-   ICAO CEILING RULE
-================================ */
-
-function extractCeilingFt(clouds?: string[]) {
-  if (!clouds || clouds.length === 0) return null;
-
-  let ceiling: number | null = null;
-
-  for (const c of clouds) {
-    const m = c.match(/^(BKN|OVC|VV)(\d{3})/);
-    if (!m) continue;
-
-    const ft = parseInt(m[2], 10) * 100;
-    if (ceiling === null || ft < ceiling) ceiling = ft;
-  }
-
-  return ceiling;
-}
+type WxResponse = {
+  metar: {
+    station_id: string;
+    wind: string;
+    visibility: string | null;
+    altimeter: string | null;
+    clouds: string[];
+    raw_text: string;
+  };
+  taf: string | null;
+  wx_analysis: {
+    reasons: string[];
+    ceilingFt: number | null;
+  };
+  time: string;
+};
 
 export default function Page() {
   const [icao, setIcao] = useState("");
-  const [data, setData] = useState<any>(null);
+  const [data, setData] = useState<WxResponse | null>(null);
   const [loading, setLoading] = useState(false);
 
   async function getWeather() {
-    if (!icao || loading) return;
+    if (!icao) return;
 
     setLoading(true);
+    setData(null);
 
-    const res = await fetch(`/api/weather?icao=${icao}`);
-    const json = await res.json();
+    try {
+      const res = await fetch(`/api/weather?icao=${icao}`, {
+        cache: "no-store",
+      });
 
-    // 🔥 サーバ由来 reasons を完全無効化
-    if (json?.wx_analysis?.reasons) {
-      json.wx_analysis.reasons = [];
+      const json = await res.json();
+      setData(json);
+    } catch (e) {
+      alert("Weather API error");
+    } finally {
+      setLoading(false);
     }
-
-    setData(json);
-    setLoading(false);
   }
 
-  /* ===============================
-     DERIVED
-  ================================ */
-
-  const clouds = data?.metar?.clouds ?? [];
-  const ceilingFt = extractCeilingFt(clouds);
-
-  const reasons: string[] = [];
-
-  if (ceilingFt !== null && ceilingFt < 3000) {
-    reasons.push(`Ceiling present (<3000ft): ${ceilingFt}ft`);
-  }
-
-  /* ===============================
-     UI
-  ================================ */
+  const reasons = data?.wx_analysis?.reasons ?? [];
 
   return (
     <main style={{ padding: 30, fontFamily: "sans-serif" }}>
-      <h1>ARI5 Weather</h1>
-
+      {/* =====================
+          ICAO INPUT
+      ====================== */}
       <div style={{ marginBottom: 20 }}>
         <input
-          placeholder="ICAO"
+          placeholder="ICAO (e.g. RJTT / KJFK)"
           value={icao}
           onChange={(e) => setIcao(e.target.value.toUpperCase())}
-          style={{ padding: 8 }}
+          style={{ padding: 8, width: 200 }}
         />
-
         <button
           onClick={getWeather}
           style={{ marginLeft: 10, padding: "8px 16px" }}
         >
-          {loading ? "Loading..." : "Get Weather"}
+          Get Weather
         </button>
       </div>
 
+      {loading && <div>Loading…</div>}
+
+      {!data && !loading && <div>—</div>}
+
       {data && (
         <>
-          <h3>METAR</h3>
-          <div>Station: {data.metar.station_id}</div>
-          <div>Clouds: {clouds.join(", ")}</div>
+          {/* =====================
+              KEY SUMMARY
+          ====================== */}
+          <h2>Key Summary</h2>
 
-          <h3 style={{ marginTop: 20 }}>判定理由（AMBER）</h3>
+          <div style={{ display: "grid", gap: 10, maxWidth: 500 }}>
+            <div>
+              <strong>Station:</strong> {data.metar.station_id}
+            </div>
+            <div>
+              <strong>Wind:</strong> {data.metar.wind}
+            </div>
+            <div>
+              <strong>Visibility:</strong>{" "}
+              {data.metar.visibility ?? "—"}
+            </div>
+            <div>
+              <strong>QNH:</strong> {data.metar.altimeter ?? "—"}
+            </div>
+            <div>
+              <strong>Clouds:</strong>{" "}
+              {data.metar.clouds.join(", ") || "—"}
+            </div>
+          </div>
+
+          {/* =====================
+              RAW TEXT
+          ====================== */}
+          <h2 style={{ marginTop: 30 }}>METAR / TAF</h2>
+
+          <div style={{ display: "flex", gap: 20 }}>
+            <pre
+              style={{
+                background: "#f6f6f6",
+                padding: 12,
+                width: "50%",
+                whiteSpace: "pre-wrap",
+              }}
+            >
+              {data.metar.raw_text}
+            </pre>
+
+            <pre
+              style={{
+                background: "#f6f6f6",
+                padding: 12,
+                width: "50%",
+                whiteSpace: "pre-wrap",
+              }}
+            >
+              {data.taf ?? "NO TAF"}
+            </pre>
+          </div>
+
+          {/* =====================
+              REASONS (SERVER ONLY)
+          ====================== */}
+          <h3 style={{ marginTop: 30 }}>判定理由（reasons）</h3>
 
           {reasons.length === 0 ? (
             <div>—</div>
@@ -100,9 +142,12 @@ export default function Page() {
             </ul>
           )}
 
-          <h2 style={{ marginTop: 30 }}>TAF Timeline</h2>
+          {/* =====================
+              TAF TIMELINE
+          ====================== */}
+          <h2 style={{ marginTop: 40 }}>TAF Timeline</h2>
 
-          <TafTimeline rawTaf={data?.taf?.raw_text ?? ""} />
+          <TafTimeline rawTaf={data.taf ?? ""} />
         </>
       )}
     </main>
