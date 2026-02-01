@@ -2,132 +2,204 @@
 
 import React, { useMemo, useState } from "react";
 
+type WxLevel = "GREEN" | "AMBER" | "RED" | "UNK";
+
 type WxResp = {
   status: "OK" | "NG";
   icao?: string;
   sources?: string[];
   metar?: {
     raw?: string;
-    wind?: string; // ex: "03003KT" or "VRB03KT"
+    wind?: string; // e.g. 09003KT / 22010G20KT
+    visibility?: string;
+    qnh?: string;
+    clouds?: string[];
   };
-  taf?: string;
+  taf?: {
+    raw?: string;
+  };
   wx_analysis?: {
-    level?: string;
+    level?: WxLevel;
     reasons?: string[];
   };
   time?: string;
+  error?: string;
 };
 
-// ====== RWY MAG HDG DB（まずは必要な空港から追加していく方式） ======
-// 目安です。正確なMAG HDGはチャート/JeppのRWY表に合わせて更新してください。
-const RWY_DB: Record<
-  string,
-  { city?: string; runways: Array<{ id: string; mag: number }> }
-> = {
-  RJCC: {
-    city: "New Chitose",
-    runways: [
-      { id: "01L", mag: 010 },
-      { id: "19R", mag: 190 },
-      { id: "01R", mag: 010 },
-      { id: "19L", mag: 190 },
-    ],
-  },
+type WindParsed = {
+  dirDeg: number | null; // null = VRB/unknown
+  spdKt: number;
+  gustKt?: number;
+  isVrb?: boolean;
+};
+
+type RunwayInfo = {
+  id: string; // "05", "23L", etc.
+  magDeg: number; // runway magnetic heading
+};
+
+// ✅ 最低限のRWY DB（必要に応じて増やす）
+// ここを拡張していけば、空港ごとに自動で候補が出ます。
+const RWY_DB: Record<string, { name?: string; runways: RunwayInfo[] }> = {
   RJTT: {
-    city: "Tokyo Haneda",
+    name: "Tokyo Haneda",
     runways: [
-      { id: "05", mag: 050 },
-      { id: "23", mag: 230 },
-      { id: "16L", mag: 160 },
-      { id: "34R", mag: 340 },
-      { id: "16R", mag: 160 },
-      { id: "34L", mag: 340 },
-      { id: "04", mag: 040 },
-      { id: "22", mag: 220 },
+      { id: "04", magDeg: 044 },
+      { id: "05", magDeg: 053 },
+      { id: "16L", magDeg: 164 },
+      { id: "16R", magDeg: 164 },
+      { id: "22", magDeg: 224 },
+      { id: "23", magDeg: 233 },
+      { id: "34L", magDeg: 344 },
+      { id: "34R", magDeg: 344 },
     ],
   },
-  RJAA: {
-    city: "Narita",
+  RJCC: {
+    name: "Sapporo New Chitose",
     runways: [
-      { id: "16R", mag: 160 },
-      { id: "34L", mag: 340 },
-      { id: "16L", mag: 160 },
-      { id: "34R", mag: 340 },
+      { id: "01L", magDeg: 013 },
+      { id: "01R", magDeg: 013 },
+      { id: "19L", magDeg: 193 },
+      { id: "19R", magDeg: 193 },
     ],
   },
-  // 必要な空港をここに追加（例）
-  // KJFK: { runways: [{ id: "04L", mag: 044 }, ...] }
+  RJNK: {
+    name: "Komatsu",
+    runways: [
+      { id: "06", magDeg: 056 },
+      { id: "24", magDeg: 236 },
+    ],
+  },
 };
 
 function normIcao(s: string) {
   return (s || "").trim().toUpperCase();
 }
 
-function clamp360(deg: number) {
-  let d = deg % 360;
-  if (d < 0) d += 360;
+function safeRound(n: number) {
+  return Math.round(n);
+}
+
+function diffAngleDeg(a: number, b: number) {
+  // returns smallest difference 0..180
+  let d = Math.abs(a - b) % 360;
+  if (d > 180) d = 360 - d;
   return d;
 }
 
-function smallestAngleDiff(a: number, b: number) {
-  // a-b の最小差（-180..+180）
-  const d = clamp360(a) - clamp360(b);
-  const x = ((d + 540) % 360) - 180;
-  return x;
+function parseWindFromString(w: string | undefined): WindParsed | null {
+  if (!w) return null;
+
+  // Normalize like: "09003KT", "22010G20KT", "VRB03KT"
+  const s = w.trim().toUpperCase();
+
+  // VRB
+  const vrb = s.match(/^VRB(\d{2,3})(G(\d{2,3}))?KT$/);
+  if (vrb) {
+    const spd = Number(vrb[1]);
+    const gust = vrb[3] ? Number(vrb[3]) : undefined;
+    return { dirDeg: null, spdKt: spd, gustKt: gust, isVrb: true };
+  }
+
+  // 00000KT (calm)
+  const calm = s.match(/^00000KT$/);
+  if (calm) {
+    return { dirDeg: 0, spdKt: 0 };
+  }
+
+  // dddssKT / dddssGggKT / allow 2-3 digit speed/gust
+  const m = s.match(/^(\d{3})(\d{2,3})(G(\d{2,3}))?KT$/);
+  if (!m) return null;
+
+  const dir = Number(m[1]);
+  const spd = Number(m[2]);
+  const gust = m[4] ? Number(m[4]) : undefined;
+
+  return { dirDeg: dir, spdKt: spd, gustKt: gust };
 }
 
-function parseMetarWind(metarRawOrWind?: string) {
-  // 入力は metar.wind（"03003KT"など） or METAR生文字列でもOK
-  const s = (metarRawOrWind || "").toUpperCase();
+function parseWindFromMetarRaw(raw: string | undefined): WindParsed | null {
+  if (!raw) return null;
+  const s = raw.toUpperCase();
 
+  // Try to find wind group inside METAR raw.
+  // examples:
+  // 09003KT
+  // 22010G20KT
   // VRB03KT
-  let m = s.match(/\b(VRB)(\d{2,3})(G(\d{2,3}))?KT\b/);
-  if (m) {
-    const spd = Number(m[2]);
-    const gst = m[4] ? Number(m[4]) : undefined;
-    return { dir: null as number | null, spd, gst, raw: m[0] };
+  const m =
+    s.match(/\b(VRB\d{2,3}(G\d{2,3})?KT)\b/) ||
+    s.match(/\b(\d{3}\d{2,3}(G\d{2,3})?KT)\b/) ||
+    s.match(/\b(00000KT)\b/);
+
+  if (!m) return null;
+  return parseWindFromString(m[1]);
+}
+
+function computeWindComponents(wind: WindParsed, rwyMag: number) {
+  // returns components for steady + optional gust
+  if (wind.spdKt <= 0) {
+    return {
+      steady: { head: 0, cross: 0, crossSide: "—" as const, headTail: "—" as const },
+      gust: wind.gustKt ? { head: 0, cross: 0, crossSide: "—" as const, headTail: "—" as const } : null,
+      note: "CALM",
+    };
   }
 
-  // 03003KT / 27010G18KT
-  m = s.match(/\b(\d{3})(\d{2,3})(G(\d{2,3}))?KT\b/);
-  if (m) {
-    const dir = Number(m[1]);
-    const spd = Number(m[2]);
-    const gst = m[4] ? Number(m[4]) : undefined;
-    return { dir, spd, gst, raw: m[0] };
+  if (wind.dirDeg === null) {
+    // VRB: cannot compute deterministic components. Provide worst-case crosswind = speed
+    const worstSteady = wind.spdKt;
+    const worstGust = wind.gustKt ?? null;
+    return {
+      steady: { head: 0, cross: worstSteady, crossSide: "VAR" as const, headTail: "VAR" as const },
+      gust: worstGust !== null ? { head: 0, cross: worstGust, crossSide: "VAR" as const, headTail: "VAR" as const } : null,
+      note: "VRB wind: components are worst-case (crosswind=max).",
+    };
   }
 
-  return null;
+  const theta = diffAngleDeg(wind.dirDeg, rwyMag); // 0..180
+  const rad = (theta * Math.PI) / 180;
+
+  const head = wind.spdKt * Math.cos(rad); // positive = headwind, negative = tailwind
+  const cross = wind.spdKt * Math.sin(rad); // magnitude only; side depends on relative bearing (we'll approximate)
+  const gustHead = wind.gustKt ? wind.gustKt * Math.cos(rad) : null;
+  const gustCross = wind.gustKt ? wind.gustKt * Math.sin(rad) : null;
+
+  // Side (L/R) – determine by signed angle using modular arithmetic
+  const signed = ((wind.dirDeg - rwyMag + 540) % 360) - 180; // -180..180
+  const crossSide = signed > 0 ? "R" : signed < 0 ? "L" : "—";
+  const headTail = head >= 0 ? "HEAD" : "TAIL";
+
+  return {
+    steady: {
+      head: head,
+      cross: cross,
+      crossSide,
+      headTail,
+    },
+    gust: wind.gustKt
+      ? {
+          head: gustHead ?? 0,
+          cross: gustCross ?? 0,
+          crossSide,
+          headTail: (gustHead ?? 0) >= 0 ? "HEAD" : "TAIL",
+        }
+      : null,
+    note: null as string | null,
+  };
 }
 
-function components(windDir: number, windSpd: number, rwyMag: number) {
-  // 風向＝"from"、滑走路方位＝進行方向
-  // angleDiff = windDir - rwyMag
-  const diff = smallestAngleDiff(windDir, rwyMag);
-  const rad = (Math.PI / 180) * diff;
-
-  const head = windSpd * Math.cos(rad); // + headwind, - tailwind
-  const cross = windSpd * Math.sin(rad); // + from right, - from left
-
-  return { diff, head, cross };
-}
-
-function fmtKt(x: number) {
-  const v = Math.round(Math.abs(x));
-  return `${v}kt`;
-}
-
-function sideLabel(cross: number) {
-  if (cross > 0.5) return "from RIGHT";
-  if (cross < -0.5) return "from LEFT";
-  return "nearly calm";
-}
-
-function badge(level?: string) {
-  const L = (level || "").toUpperCase();
-  if (L === "RED") return { text: "WX LEVEL: RED", cls: "red" };
-  if (L === "AMBER") return { text: "WX LEVEL: AMBER", cls: "amber" };
-  return { text: `WX LEVEL: ${L || "—"}`, cls: "green" };
+function levelBadge(level: WxLevel | undefined) {
+  const L = level ?? "UNK";
+  const text =
+    L === "GREEN"
+      ? "GREEN 通常運航可（監視継続）"
+      : L === "AMBER"
+      ? "AMBER 注意（条件確認・要監視）"
+      : L === "RED"
+      ? "RED 警戒（運航判断に注意）"
+      : "UNK 判定不能";
+  return { L, text };
 }
 
 export default function Page() {
@@ -137,16 +209,28 @@ export default function Page() {
   const [showRaw, setShowRaw] = useState(false);
 
   // Crosswind UI
-  const [manualRwyMag, setManualRwyMag] = useState<number>(0);
   const [selectedRwy, setSelectedRwy] = useState<string>("");
+  const [manualRwyMag, setManualRwyMag] = useState<number>(0);
   const [limitSteady, setLimitSteady] = useState<number>(30);
   const [limitGust, setLimitGust] = useState<number>(35);
 
+  const icaoKey = useMemo(() => normIcao(icao), [icao]);
+
   const rwyList = useMemo(() => {
-    const key = normIcao(icao);
-    const entry = RWY_DB[key];
-    return entry?.runways || [];
-  }, [icao]);
+    return RWY_DB[icaoKey]?.runways ?? [];
+  }, [icaoKey]);
+
+  // If runway list exists, auto-select first if none selected
+  React.useEffect(() => {
+    if (rwyList.length > 0 && !selectedRwy) {
+      setSelectedRwy(rwyList[0].id);
+      setManualRwyMag(0);
+    }
+    if (rwyList.length === 0) {
+      setSelectedRwy("");
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [icaoKey, rwyList.length]);
 
   async function getWeather() {
     setLoading(true);
@@ -156,709 +240,695 @@ export default function Page() {
       const res = await fetch(`/api/weather?icao=${encodeURIComponent(key)}`, {
         cache: "no-store",
       });
-      const j = (await res.json()) as WxResp;
-      setData(j);
-
-      // 既定RWY選択
-      const list = RWY_DB[key]?.runways || [];
-      if (list.length > 0) setSelectedRwy(list[0].id);
-      else setSelectedRwy("");
+      const json = (await res.json()) as WxResp;
+      setData(json);
     } catch (e: any) {
-      setData({ status: "NG" });
+      setData({ status: "NG", error: String(e) });
     } finally {
       setLoading(false);
     }
   }
 
-  const metarRaw = data?.metar?.raw || "";
-  const tafRaw = data?.taf || "";
-  const wx = badge(data?.wx_analysis?.level);
+  const metarRaw = data?.metar?.raw ?? "";
+  const tafRaw = data?.taf?.raw ?? "";
+  const wxLevel = data?.wx_analysis?.level ?? "UNK";
+  const badge = levelBadge(wxLevel);
 
-  const windParsed = useMemo(() => {
-    // まず metar.wind、なければ metar.raw から拾う
-    const s = data?.metar?.wind || data?.metar?.raw || "";
-    return parseMetarWind(s);
-  }, [data]);
+  // Wind parse
+  const windParsed: WindParsed | null = useMemo(() => {
+    // Priority: structured metar.wind -> parse from raw
+    const fromField = parseWindFromString(data?.metar?.wind);
+    if (fromField) return fromField;
+    const fromRaw = parseWindFromMetarRaw(metarRaw);
+    return fromRaw;
+  }, [data?.metar?.wind, metarRaw]);
 
-  const activeRwyMag = useMemo(() => {
-    const key = normIcao(icao);
-    const list = RWY_DB[key]?.runways || [];
-    const found = list.find((r) => r.id === selectedRwy);
-    return found?.mag ?? (manualRwyMag || 0);
-  }, [icao, selectedRwy, manualRwyMag]);
-
-  const crossResult = useMemo(() => {
-    if (!windParsed) return null;
-
-    // VRBの場合：厳密計算不可 → “最大横風=風速(steady/gust)”として提示
-    if (windParsed.dir == null) {
-      const steady = windParsed.spd;
-      const gust = windParsed.gst ?? null;
-      return {
-        vrb: true,
-        steadyCross: steady,
-        gustCross: gust,
-        steadyHead: 0,
-        gustHead: gust ? 0 : null,
-        diff: null,
-      };
+  // Runway mag heading to use
+  const rwyMag: number | null = useMemo(() => {
+    if (rwyList.length > 0 && selectedRwy) {
+      const hit = rwyList.find((r) => r.id === selectedRwy);
+      if (hit) return hit.magDeg;
     }
+    if (manualRwyMag && manualRwyMag > 0) return manualRwyMag;
+    return null;
+  }, [manualRwyMag, rwyList, selectedRwy]);
 
-    const steady = components(windParsed.dir, windParsed.spd, activeRwyMag);
-    const gust =
-      windParsed.gst != null
-        ? components(windParsed.dir, windParsed.gst, activeRwyMag)
-        : null;
+  const crosswind = useMemo(() => {
+    if (!windParsed || rwyMag === null) return null;
+    return computeWindComponents(windParsed, rwyMag);
+  }, [windParsed, rwyMag]);
 
-    return {
-      vrb: false,
-      steadyCross: steady.cross,
-      steadyHead: steady.head,
-      gustCross: gust ? gust.cross : null,
-      gustHead: gust ? gust.head : null,
-      diff: steady.diff,
-    };
-  }, [windParsed, activeRwyMag]);
+  const steadyCrossAbs = crosswind ? Math.abs(crosswind.steady.cross) : null;
+  const gustCrossAbs = crosswind?.gust ? Math.abs(crosswind.gust.cross) : null;
 
-  const crossSteadyAbs = crossResult ? Math.abs(crossResult.steadyCross) : 0;
-  const crossGustAbs =
-    crossResult && crossResult.gustCross != null
-      ? Math.abs(crossResult.gustCross)
-      : null;
-
-  const xwSteadyOk = crossResult ? crossSteadyAbs <= limitSteady : true;
-  const xwGustOk =
-    crossGustAbs == null ? true : crossGustAbs <= (limitGust || limitSteady);
-
-  const tailwindSteady =
-    crossResult && !crossResult.vrb ? crossResult.steadyHead < -0.5 : false;
-  const tailwindGust =
-    crossResult && !crossResult.vrb && crossResult.gustHead != null
-      ? crossResult.gustHead < -0.5
-      : false;
+  const steadyOK = steadyCrossAbs === null ? null : steadyCrossAbs <= limitSteady;
+  const gustOK = gustCrossAbs === null ? null : gustCrossAbs <= limitGust;
 
   return (
-    <div className="wrap">
-      <div className="card">
-        <div className="title">ARI UI Test</div>
-        <div className="sub">
-          ICAO入力 → METAR/TAF取得 → WX注意喚起（UI先行）
-        </div>
-
-        <div className={`wx ${wx.cls}`}>{wx.text}</div>
-        <div className="sources">
-          Sources: {data?.sources?.join(", ") || "—"}
-        </div>
-      </div>
-
-      <div className="card">
-        <div className="row">
-          <div className="col">
-            <div className="label">ICAO</div>
-            <input
-              value={icao}
-              onChange={(e) => setIcao(e.target.value)}
-              placeholder="RJTT / RJAA / RJCC"
-            />
-            <div className="hint">例: RJTT / RJAA / KJFK</div>
+    <main className="bg">
+      <div className="container">
+        <div className="card hero">
+          <div>
+            <h1>ARI UI Test</h1>
+            <div className="subtitle">ICAO入力 → METAR/TAF取得 → WX注意喚起（UI先行）</div>
+          </div>
+          <div className="sources">
+            Sources: metar, taf, aviationweather.gov
           </div>
 
-          <button className="btn" onClick={getWeather} disabled={loading}>
-            {loading ? "Loading..." : "Get Weather"}
-          </button>
-
-          <button className="btn2" onClick={() => setShowRaw((v) => !v)}>
-            {showRaw ? "Hide Raw" : "Show Raw"}
-          </button>
-        </div>
-      </div>
-
-      <div className="grid2">
-        {/* Key Summary */}
-        <div className="card">
-          <div className="h2">Key Summary</div>
-
-          <div className="kgrid">
-            <div className="kbox">
-              <div className="k">Station</div>
-              <div className="v">{normIcao(data?.icao || icao) || "—"}</div>
-            </div>
-            <div className="kbox">
-              <div className="k">Wind</div>
-              <div className="v">
-                {windParsed ? windParsed.raw : data?.metar?.wind || "—"}
-              </div>
-            </div>
-            <div className="kbox">
-              <div className="k">Visibility</div>
-              <div className="v">{/* metar parse簡易：raw内の 9999 */}</div>
-              <div className="v2">
-                {(() => {
-                  const m = (metarRaw || "").toUpperCase().match(/\b(\d{4})\b/);
-                  return m ? m[1] : "—";
-                })()}
-              </div>
-            </div>
-            <div className="kbox">
-              <div className="k">QNH</div>
-              <div className="v2">
-                {(() => {
-                  const m = (metarRaw || "").toUpperCase().match(/\bQ(\d{4})\b/);
-                  return m ? m[1] : "—";
-                })()}
-              </div>
-            </div>
-
-            <div className="kbox wide">
-              <div className="k">Clouds</div>
-              <div className="v2">
-                {(() => {
-                  const s = (metarRaw || "").toUpperCase();
-                  const clouds = s.match(/\b(FEW|SCT|BKN|OVC)\d{3}\b/g);
-                  return clouds ? clouds.join(", ") : "—";
-                })()}
-              </div>
-            </div>
-
-            <div className="kbox wide">
-              <div className="k">WX (METAR)</div>
-              <div className="v2">
-                {(() => {
-                  // 雑に天気現象っぽいトークンを抽出（-RA, SN, TS など）
-                  const s = (metarRaw || "").toUpperCase();
-                  const tokens = s.split(/\s+/).filter(Boolean);
-
-                  // 典型例だけ拾う（必要に応じて追加可能）
-                  const wxCandidates = tokens.filter((t) =>
-                    /^(VC)?(TS|SH)?(RA|SN|PL|GR|GS|DZ|SG|IC|UP)|^(TSRA|TSSN|SHRA|SHSN|FZRA|FZDZ)|^(BR|FG|FU|DU|SA|HZ)|^(-|\+)?(RA|SN|TS|SHRA|SHSN|FZRA|FZDZ)$/.test(
-                      t
-                    )
-                  );
-
-                  // METARの "RMK" 以降は切る
-                  const rmkIdx = tokens.indexOf("RMK");
-                  const scoped =
-                    rmkIdx >= 0 ? tokens.slice(0, rmkIdx) : tokens;
-
-                  const wx2 = scoped.filter((t) =>
-                    /^(-|\+)?(TS|SH)?(RA|SN|PL|GR|GS|DZ|SG)|^(TSRA|TSSN|SHRA|SHSN|FZRA|FZDZ)|^(BR|FG|HZ)$/.test(
-                      t
-                    )
-                  );
-
-                  const use = wx2.length ? wx2 : wxCandidates;
-                  return use.length ? use.join(", ") : "—";
-                })()}
-              </div>
-            </div>
-          </div>
-
-          <div className="muted">
-            Updated (UTC): {data?.time || "—"}
+          <div className={`badge ${badge.L.toLowerCase()}`}>
+            <span className="badgeTitle">WX LEVEL: {badge.L}</span>
+            <span className="badgeText">{badge.text}</span>
           </div>
         </div>
 
-        {/* METAR/TAF RAW + reasons */}
-        <div className="card">
-          <div className="h2">METAR / TAF</div>
-          <div className="sub2">原文はカード表示（折返し対応）</div>
-
-          <div className="two">
-            <div className="raw">
-              <div className="rawh">METAR RAW</div>
-              <div className="mono">{metarRaw || "—"}</div>
-            </div>
-            <div className="raw">
-              <div className="rawh">TAF RAW</div>
-              <div className="mono">{tafRaw || "—"}</div>
-            </div>
-          </div>
-
-          <div className="hr" />
-
-          <div className="reasons">
-            <div className="rttl">
-              判定理由（reasons） / <b>{data?.wx_analysis?.level || "—"}</b>
-            </div>
-            <ul>
-              {(data?.wx_analysis?.reasons || []).length ? (
-                data!.wx_analysis!.reasons!.map((r, i) => <li key={i}>{r}</li>)
-              ) : (
-                <li>（現状は簡易判定のみ。次フェーズで拡張します）</li>
-              )}
-            </ul>
-          </div>
-
-          {showRaw && (
-            <>
-              <div className="hr" />
-              <div className="raw">
-                <div className="rawh">RAW JSON</div>
-                <pre className="mono">{JSON.stringify(data, null, 2)}</pre>
-              </div>
-            </>
-          )}
-        </div>
-      </div>
-
-      {/* Crosswind */}
-      <div className="card">
-        <div className="h2">Crosswind（RWY別）</div>
-        <div className="sub2">
-          METAR wind → RWY MAG HDG → Head/Cross（steady / gust）を自動計算
-        </div>
-
-        <div className="row2">
-          <div className="col2">
-            <div className="label">RWY</div>
-            {rwyList.length ? (
-              <select
-                value={selectedRwy}
-                onChange={(e) => setSelectedRwy(e.target.value)}
-              >
-                {rwyList.map((r) => (
-                  <option key={r.id} value={r.id}>
-                    {r.id} (MAG {String(r.mag).padStart(3, "0")})
-                  </option>
-                ))}
-              </select>
-            ) : (
-              <>
-                <div className="hint">
-                  RWY DB未登録: manual MAG HDG を入力してください
-                </div>
-                <input
-                  type="number"
-                  value={manualRwyMag || 0}
-                  onChange={(e) => setManualRwyMag(Number(e.target.value))}
-                  placeholder="ex: 160"
-                />
-              </>
-            )}
-            <div className="hint">
-              Active RWY MAG: <b>{String(activeRwyMag).padStart(3, "0")}</b>
-            </div>
-          </div>
-
-          <div className="col2">
-            <div className="label">Limit（steady / gust）</div>
-            <div className="row3">
+        <div className="card inputCard">
+          <div className="row">
+            <div className="field">
+              <div className="label">ICAO</div>
               <input
-                type="number"
-                value={limitSteady}
-                onChange={(e) => setLimitSteady(Number(e.target.value))}
-                placeholder="steady"
+                value={icao}
+                onChange={(e) => setIcao(e.target.value)}
+                onBlur={() => setIcao((v) => normIcao(v))}
+                placeholder="RJTT"
               />
-              <input
-                type="number"
-                value={limitGust}
-                onChange={(e) => setLimitGust(Number(e.target.value))}
-                placeholder="gust"
-              />
+              <div className="hint">例: RJTT / RJAA / KJFK</div>
             </div>
-            <div className="hint">
-              gustが無い場合は steady のみ評価
+
+            <div className="btnRow">
+              <button className="btn primary" onClick={getWeather} disabled={loading}>
+                {loading ? "Loading..." : "Get Weather"}
+              </button>
+              <button className="btn" onClick={() => setShowRaw((v) => !v)} disabled={!data}>
+                {showRaw ? "Hide Raw" : "Show Raw"}
+              </button>
             </div>
           </div>
         </div>
 
-        <div className="xwBox">
-          {!windParsed ? (
-            <div className="muted">
-              まだ風が取れていません（Get Weather を押してください）
-            </div>
-          ) : crossResult?.vrb ? (
-            <div className="xwGrid">
-              <div className="xcell">
+        <div className="grid2">
+          <div className="card">
+            <h2>Key Summary</h2>
+
+            <div className="kvGrid">
+              <div className="kv">
+                <div className="k">Station</div>
+                <div className="v">{icaoKey || "—"}</div>
+              </div>
+              <div className="kv">
                 <div className="k">Wind</div>
-                <div className="v2">{windParsed.raw}</div>
-                <div className="muted">VRBのため角度計算は不可</div>
+                <div className="v">{data?.metar?.wind ?? (windParsed ? (windParsed.isVrb ? `VRB${String(windParsed.spdKt).padStart(2, "0")}KT` : `${String(windParsed.dirDeg ?? 0).padStart(3, "0")}${String(windParsed.spdKt).padStart(2, "0")}KT`) : "—")}</div>
               </div>
-              <div className={`xcell ${xwSteadyOk ? "ok" : "ng"}`}>
-                <div className="k">Max Crosswind（steady）</div>
-                <div className="v2">{windParsed.spd}kt</div>
-                <div className="muted">
-                  ≤ {limitSteady}kt : {xwSteadyOk ? "OK" : "EXCEED"}
-                </div>
+              <div className="kv">
+                <div className="k">Visibility</div>
+                <div className="v">{data?.metar?.visibility ?? "—"}</div>
               </div>
-              <div
-                className={`xcell ${
-                  windParsed.gst == null
-                    ? "na"
-                    : xwGustOk
-                    ? "ok"
-                    : "ng"
-                }`}
-              >
-                <div className="k">Max Crosswind（gust）</div>
-                <div className="v2">{windParsed.gst ?? "—"}kt</div>
-                <div className="muted">
-                  ≤ {limitGust}kt :{" "}
-                  {windParsed.gst == null ? "—" : xwGustOk ? "OK" : "EXCEED"}
+              <div className="kv">
+                <div className="k">QNH</div>
+                <div className="v">{data?.metar?.qnh ?? "—"}</div>
+              </div>
+              <div className="kv wide">
+                <div className="k">Clouds</div>
+                <div className="v strong">{(data?.metar?.clouds ?? []).length ? (data?.metar?.clouds ?? []).join(", ") : "—"}</div>
+              </div>
+
+              {/* ✅ Crosswind */}
+              <div className="kv wide">
+                <div className="k">Crosswind (RWY)</div>
+
+                <div className="crossWrap">
+                  <div className="crossTop">
+                    <div className="crossCol">
+                      <div className="miniLabel">Runway</div>
+
+                      {rwyList.length > 0 ? (
+                        <div className="rowInline">
+                          <select
+                            value={selectedRwy}
+                            onChange={(e) => setSelectedRwy(e.target.value)}
+                          >
+                            {rwyList.map((r) => (
+                              <option key={r.id} value={r.id}>
+                                {r.id} (MAG {r.magDeg}°)
+                              </option>
+                            ))}
+                          </select>
+                          <div className="miniHint">DB</div>
+                        </div>
+                      ) : (
+                        <div className="rowInline">
+                          <input
+                            type="number"
+                            value={manualRwyMag || ""}
+                            onChange={(e) => setManualRwyMag(Number(e.target.value))}
+                            placeholder="MAG deg"
+                            min={0}
+                            max={360}
+                          />
+                          <div className="miniHint">Manual RWY MAG HDG</div>
+                        </div>
+                      )}
+                    </div>
+
+                    <div className="crossCol">
+                      <div className="miniLabel">Limit (steady / gust)</div>
+                      <div className="rowInline">
+                        <input
+                          type="number"
+                          value={limitSteady}
+                          onChange={(e) => setLimitSteady(Number(e.target.value))}
+                          min={0}
+                          max={80}
+                        />
+                        <span className="unit">kt</span>
+                        <span className="sep">/</span>
+                        <input
+                          type="number"
+                          value={limitGust}
+                          onChange={(e) => setLimitGust(Number(e.target.value))}
+                          min={0}
+                          max={80}
+                        />
+                        <span className="unit">kt</span>
+                      </div>
+                      <div className="miniHint">gustはMETARにGがある時のみ</div>
+                    </div>
+                  </div>
+
+                  <div className="crossResult">
+                    {!data ? (
+                      <div className="muted">まず「Get Weather」を押してください。</div>
+                    ) : !windParsed ? (
+                      <div className="muted">Wind を解析できません（METARの風群が見つからない）。</div>
+                    ) : rwyMag === null ? (
+                      <div className="muted">Runway MAG HDG を選択/入力してください。</div>
+                    ) : (
+                      <>
+                        <div className="pillRow">
+                          <div className={`pill ${steadyOK === null ? "" : steadyOK ? "ok" : "ng"}`}>
+                            <div className="pillTitle">STEADY</div>
+                            <div className="pillVal">
+                              XW {safeRound(Math.abs(crosswind!.steady.cross))}kt {crosswind!.steady.crossSide} /{" "}
+                              {crosswind!.steady.headTail} {safeRound(Math.abs(crosswind!.steady.head))}kt
+                            </div>
+                            <div className="pillSub">
+                              Limit {limitSteady}kt → {steadyOK ? "OK" : "EXCEED"}
+                            </div>
+                          </div>
+
+                          <div className={`pill ${gustOK === null ? "dim" : gustOK ? "ok" : "ng"}`}>
+                            <div className="pillTitle">GUST</div>
+                            <div className="pillVal">
+                              {crosswind!.gust
+                                ? `XW ${safeRound(Math.abs(crosswind!.gust.cross))}kt ${crosswind!.gust.crossSide} / ${crosswind!.gust.headTail} ${safeRound(Math.abs(crosswind!.gust.head))}kt`
+                                : "—"}
+                            </div>
+                            <div className="pillSub">
+                              {crosswind!.gust ? `Limit ${limitGust}kt → ${gustOK ? "OK" : "EXCEED"}` : "METAR gustなし"}
+                            </div>
+                          </div>
+                        </div>
+
+                        {crosswind?.note ? <div className="note">{crosswind.note}</div> : null}
+                      </>
+                    )}
+                  </div>
                 </div>
               </div>
             </div>
-          ) : (
-            <div className="xwGrid">
-              <div className="xcell">
-                <div className="k">Wind</div>
-                <div className="v2">{windParsed.raw}</div>
-                <div className="muted">
-                  Angle diff:{" "}
-                  {crossResult?.diff != null
-                    ? `${Math.round(crossResult.diff)}°`
-                    : "—"}
-                </div>
-              </div>
 
-              <div className={`xcell ${tailwindSteady ? "warn" : "ok"}`}>
-                <div className="k">Head/Tail（steady）</div>
-                <div className="v2">
-                  {tailwindSteady
-                    ? `TAIL ${fmtKt(crossResult!.steadyHead)}`
-                    : `HEAD ${fmtKt(crossResult!.steadyHead)}`}
-                </div>
-                <div className="muted">
-                  {tailwindSteady ? "Tailwind present" : "No tailwind"}
-                </div>
-              </div>
+            <div className="updated">
+              Updated (UTC): {data?.time ? new Date(data.time).toISOString() : "—"}
+            </div>
+          </div>
 
-              <div className={`xcell ${xwSteadyOk ? "ok" : "ng"}`}>
-                <div className="k">Crosswind（steady）</div>
-                <div className="v2">
-                  {fmtKt(crossResult!.steadyCross)}{" "}
-                  <span className="muted">({sideLabel(crossResult!.steadyCross)})</span>
-                </div>
-                <div className="muted">
-                  ≤ {limitSteady}kt : {xwSteadyOk ? "OK" : "EXCEED"}
-                </div>
-              </div>
+          <div className="card">
+            <h2>METAR / TAF</h2>
+            <div className="hint">原文はカード表示（折返し対応）</div>
 
-              <div className={`xcell ${tailwindGust ? "warn" : "na"}`}>
-                <div className="k">Head/Tail（gust）</div>
-                <div className="v2">
-                  {crossResult!.gustHead == null
-                    ? "—"
-                    : tailwindGust
-                    ? `TAIL ${fmtKt(crossResult!.gustHead)}`
-                    : `HEAD ${fmtKt(crossResult!.gustHead)}`}
-                </div>
-                <div className="muted">
-                  {crossResult!.gustHead == null
-                    ? "No gust"
-                    : tailwindGust
-                    ? "Tailwind present"
-                    : "No tailwind"}
-                </div>
+            <div className="twoCols">
+              <div className="box">
+                <div className="boxTitle">METAR RAW</div>
+                <pre>{metarRaw || "—"}</pre>
               </div>
-
-              <div
-                className={`xcell ${
-                  crossResult!.gustCross == null ? "na" : xwGustOk ? "ok" : "ng"
-                }`}
-              >
-                <div className="k">Crosswind（gust）</div>
-                <div className="v2">
-                  {crossResult!.gustCross == null
-                    ? "—"
-                    : `${fmtKt(crossResult!.gustCross)} `}
-                  <span className="muted">
-                    {crossResult!.gustCross == null
-                      ? ""
-                      : `(${sideLabel(crossResult!.gustCross)})`}
-                  </span>
-                </div>
-                <div className="muted">
-                  ≤ {limitGust}kt :{" "}
-                  {crossResult!.gustCross == null ? "—" : xwGustOk ? "OK" : "EXCEED"}
-                </div>
+              <div className="box">
+                <div className="boxTitle">TAF RAW</div>
+                <pre>{tafRaw || "—"}</pre>
               </div>
             </div>
-          )}
+
+            <div className="reasons">
+              <div className="reasonsTitle">判定理由（reasons） / {badge.L}</div>
+              <ul>
+                {(data?.wx_analysis?.reasons ?? []).length ? (
+                  (data?.wx_analysis?.reasons ?? []).map((r, i) => <li key={i}>{r}</li>)
+                ) : (
+                  <li className="muted">まだ理由がありません（解析ロジックは次フェーズで追加します）。</li>
+                )}
+              </ul>
+            </div>
+
+            {showRaw ? (
+              <div className="rawBlock">
+                <div className="boxTitle">RAW JSON</div>
+                <pre>{JSON.stringify(data, null, 2)}</pre>
+              </div>
+            ) : null}
+          </div>
         </div>
 
-        <div className="muted2">
-          ※RWY MAG HDGは空港/滑走路ごとにDB化してください（RNAV/Jepp/最新チャート基準推奨）。
+        <div className="card footerNote">
+          ※ 次フェーズで「TAF時系列」「TS/CB即RED」「Alternate minima」「RWY別MAG HDG DB拡張」を追加できます。
         </div>
       </div>
 
-      <style jsx>{`
-        .wrap {
-          max-width: 1100px;
-          margin: 22px auto;
-          padding: 0 14px 40px;
-          background: #f6f7f9;
-        }
-        .card {
-          background: #fff;
-          border: 1px solid #e8e9ee;
-          border-radius: 16px;
-          padding: 18px;
-          margin-bottom: 14px;
-          box-shadow: 0 1px 0 rgba(0, 0, 0, 0.02);
-        }
-        .title {
-          font-size: 28px;
-          font-weight: 900;
-          margin-bottom: 6px;
-        }
-        .sub {
-          color: #666;
-          font-size: 13px;
-          margin-bottom: 12px;
-        }
-        .sub2 {
-          color: #666;
-          font-size: 12px;
-          margin-bottom: 12px;
-        }
-        .sources {
-          margin-top: 10px;
-          font-size: 12px;
-          color: #777;
-        }
-        .wx {
-          display: inline-block;
-          padding: 10px 14px;
-          border-radius: 999px;
-          font-weight: 900;
-          font-size: 13px;
-          border: 1px solid transparent;
-        }
-        .wx.green {
-          background: #e9f7ee;
-          border-color: #bfe7cd;
-          color: #1b6b3a;
-        }
-        .wx.amber {
-          background: #fff4e6;
-          border-color: #ffd5a6;
-          color: #8a4b00;
-        }
-        .wx.red {
-          background: #ffe8e8;
-          border-color: #ffbcbc;
-          color: #8a0000;
+      <style jsx global>{`
+        :root {
+          --bg: #f5f6f8;
+          --card: #ffffff;
+          --text: #111827;
+          --muted: #6b7280;
+          --border: #e5e7eb;
+          --shadow: 0 8px 24px rgba(0, 0, 0, 0.06);
+          --radius: 16px;
         }
 
-        .row {
+        * {
+          box-sizing: border-box;
+        }
+
+        body {
+          margin: 0;
+          background: var(--bg);
+          color: var(--text);
+          font-family: ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial,
+            "Apple Color Emoji", "Segoe UI Emoji";
+        }
+
+        .bg {
+          padding: 28px 18px;
+        }
+
+        .container {
+          max-width: 1120px;
+          margin: 0 auto;
           display: flex;
-          gap: 12px;
+          flex-direction: column;
+          gap: 18px;
+        }
+
+        .card {
+          background: var(--card);
+          border: 1px solid var(--border);
+          border-radius: var(--radius);
+          box-shadow: var(--shadow);
+          padding: 18px 18px;
+        }
+
+        .hero {
+          display: flex;
+          flex-direction: column;
+          gap: 10px;
+        }
+
+        h1 {
+          margin: 0;
+          font-size: 34px;
+          letter-spacing: -0.02em;
+        }
+
+        h2 {
+          margin: 0 0 10px 0;
+          font-size: 18px;
+        }
+
+        .subtitle {
+          color: var(--muted);
+          margin-top: 4px;
+          font-size: 13px;
+        }
+
+        .sources {
+          align-self: flex-end;
+          color: var(--muted);
+          font-size: 12px;
+        }
+
+        .badge {
+          display: inline-flex;
+          align-items: center;
+          gap: 10px;
+          padding: 10px 12px;
+          border-radius: 999px;
+          border: 1px solid var(--border);
+          width: fit-content;
+        }
+        .badgeTitle {
+          font-weight: 800;
+          letter-spacing: 0.02em;
+        }
+        .badgeText {
+          color: #111827;
+          font-size: 13px;
+        }
+        .badge.green {
+          background: #eafff2;
+          border-color: #b7f7d0;
+        }
+        .badge.amber {
+          background: #fff3e6;
+          border-color: #ffd6ad;
+        }
+        .badge.red {
+          background: #ffecec;
+          border-color: #ffb9b9;
+        }
+        .badge.unk {
+          background: #f3f4f6;
+        }
+
+        .inputCard .row {
+          display: flex;
+          gap: 14px;
           align-items: flex-end;
+          justify-content: space-between;
           flex-wrap: wrap;
         }
-        .col {
+
+        .field {
+          min-width: 320px;
           flex: 1;
-          min-width: 260px;
         }
+
         .label {
           font-size: 12px;
-          font-weight: 800;
-          color: #555;
+          color: var(--muted);
           margin-bottom: 6px;
         }
+
         input,
         select {
           width: 100%;
+          height: 42px;
           padding: 10px 12px;
-          border: 1px solid #e3e6ee;
-          border-radius: 12px;
-          font-size: 14px;
+          border-radius: 10px;
+          border: 1px solid var(--border);
           outline: none;
+          font-size: 14px;
+          background: #fff;
         }
+
         .hint {
-          font-size: 12px;
-          color: #777;
           margin-top: 6px;
+          font-size: 12px;
+          color: var(--muted);
         }
+
+        .btnRow {
+          display: flex;
+          gap: 10px;
+        }
+
         .btn {
-          padding: 11px 14px;
+          height: 42px;
+          padding: 0 14px;
           border-radius: 12px;
-          border: 1px solid #111;
-          background: #111;
-          color: #fff;
-          font-weight: 900;
+          border: 1px solid var(--border);
+          background: #fff;
           cursor: pointer;
-          white-space: nowrap;
+          font-weight: 700;
         }
+
+        .btn.primary {
+          background: #111827;
+          color: #fff;
+          border-color: #111827;
+        }
+
         .btn:disabled {
           opacity: 0.6;
           cursor: not-allowed;
-        }
-        .btn2 {
-          padding: 11px 14px;
-          border-radius: 12px;
-          border: 1px solid #e3e6ee;
-          background: #fff;
-          color: #111;
-          font-weight: 900;
-          cursor: pointer;
-          white-space: nowrap;
         }
 
         .grid2 {
           display: grid;
           grid-template-columns: 1fr 1fr;
-          gap: 14px;
+          gap: 18px;
         }
+
         @media (max-width: 980px) {
           .grid2 {
             grid-template-columns: 1fr;
           }
         }
 
-        .h2 {
-          font-size: 18px;
-          font-weight: 900;
-          margin-bottom: 10px;
-        }
-
-        .kgrid {
+        .kvGrid {
           display: grid;
           grid-template-columns: 1fr 1fr;
           gap: 10px;
         }
-        .kbox {
-          border: 1px solid #eef0f5;
+
+        .kv {
+          border: 1px solid var(--border);
           border-radius: 12px;
-          padding: 12px;
-          background: #fafbfc;
+          padding: 10px 12px;
+          background: #fbfbfc;
         }
-        .kbox.wide {
+
+        .kv.wide {
           grid-column: 1 / -1;
         }
+
         .k {
           font-size: 12px;
-          font-weight: 900;
-          color: #666;
+          color: var(--muted);
           margin-bottom: 6px;
+          font-weight: 600;
         }
+
         .v {
-          font-size: 14px;
-          font-weight: 900;
+          font-size: 15px;
+          font-weight: 700;
         }
-        .v2 {
-          font-size: 14px;
-          font-weight: 900;
-          word-break: break-word;
+
+        .v.strong {
+          font-weight: 800;
         }
-        .muted,
-        .muted2 {
+
+        .updated {
           margin-top: 10px;
-          color: #777;
           font-size: 12px;
+          color: var(--muted);
         }
 
-        .two {
-          display: grid;
-          grid-template-columns: 1fr 1fr;
-          gap: 10px;
-        }
-        @media (max-width: 980px) {
-          .two {
-            grid-template-columns: 1fr;
-          }
-        }
-        .raw {
-          border: 1px solid #eef0f5;
-          border-radius: 12px;
-          padding: 12px;
-          background: #fafbfc;
-        }
-        .rawh {
-          font-weight: 900;
-          font-size: 12px;
-          margin-bottom: 8px;
-          color: #555;
-        }
-        .mono {
-          font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono",
-            "Courier New", monospace;
-          font-size: 12px;
-          white-space: pre-wrap;
-          word-break: break-word;
-          line-height: 1.55;
-          color: #111;
-        }
-        .hr {
-          height: 1px;
-          background: #eef0f5;
-          margin: 14px 0;
-        }
-        .reasons .rttl {
-          font-weight: 900;
-          margin-bottom: 8px;
-        }
-        ul {
-          margin: 0;
-          padding-left: 18px;
-          color: #333;
-          font-size: 13px;
-        }
-
-        /* Crosswind */
-        .row2 {
+        .twoCols {
           display: grid;
           grid-template-columns: 1fr 1fr;
           gap: 12px;
-          margin-bottom: 12px;
         }
+
         @media (max-width: 980px) {
-          .row2 {
+          .twoCols {
             grid-template-columns: 1fr;
           }
         }
-        .col2 {
-          border: 1px solid #eef0f5;
+
+        .box {
+          border: 1px solid var(--border);
           border-radius: 12px;
-          padding: 12px;
-          background: #fafbfc;
+          padding: 10px 12px;
+          background: #fbfbfc;
         }
-        .row3 {
+
+        .boxTitle {
+          font-size: 12px;
+          color: var(--muted);
+          font-weight: 700;
+          margin-bottom: 8px;
+        }
+
+        pre {
+          margin: 0;
+          white-space: pre-wrap;
+          word-break: break-word;
+          font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono",
+            "Courier New", monospace;
+          font-size: 12px;
+          line-height: 1.45;
+        }
+
+        .reasons {
+          margin-top: 12px;
+          border-top: 1px dashed var(--border);
+          padding-top: 12px;
+        }
+
+        .reasonsTitle {
+          font-size: 13px;
+          font-weight: 800;
+          margin-bottom: 6px;
+        }
+
+        ul {
+          margin: 0;
+          padding-left: 18px;
+        }
+
+        li {
+          margin: 4px 0;
+          font-size: 13px;
+        }
+
+        .muted {
+          color: var(--muted);
+        }
+
+        .rawBlock {
+          margin-top: 12px;
+          border: 1px solid var(--border);
+          border-radius: 12px;
+          padding: 10px 12px;
+          background: #0b1220;
+          color: #d1fae5;
+        }
+
+        .rawBlock .boxTitle {
+          color: #9ca3af;
+        }
+
+        .footerNote {
+          color: var(--muted);
+          font-size: 12px;
+        }
+
+        /* Crosswind UI */
+        .crossWrap {
+          display: flex;
+          flex-direction: column;
+          gap: 10px;
+        }
+
+        .crossTop {
           display: grid;
           grid-template-columns: 1fr 1fr;
           gap: 10px;
         }
 
-        .xwBox {
-          border: 1px solid #eef0f5;
-          border-radius: 12px;
-          padding: 12px;
-          background: #fff;
-        }
-        .xwGrid {
-          display: grid;
-          grid-template-columns: repeat(3, 1fr);
-          gap: 10px;
-        }
         @media (max-width: 980px) {
-          .xwGrid {
+          .crossTop {
             grid-template-columns: 1fr;
           }
         }
-        .xcell {
-          border: 1px solid #eef0f5;
+
+        .crossCol {
+          border: 1px solid var(--border);
           border-radius: 12px;
-          padding: 12px;
-          background: #fafbfc;
+          padding: 10px 12px;
+          background: #ffffff;
         }
-        .xcell.ok {
-          background: #e9f7ee;
-          border-color: #bfe7cd;
+
+        .miniLabel {
+          font-size: 12px;
+          color: var(--muted);
+          font-weight: 700;
+          margin-bottom: 8px;
         }
-        .xcell.ng {
-          background: #ffe8e8;
-          border-color: #ffbcbc;
+
+        .rowInline {
+          display: flex;
+          align-items: center;
+          gap: 8px;
         }
-        .xcell.warn {
-          background: #fff4e6;
-          border-color: #ffd5a6;
+
+        .rowInline input,
+        .rowInline select {
+          height: 38px;
         }
-        .xcell.na {
-          background: #f5f6f8;
-          border-color: #e8e9ee;
+
+        .miniHint {
+          font-size: 12px;
+          color: var(--muted);
+          white-space: nowrap;
+        }
+
+        .unit {
+          font-size: 12px;
+          color: var(--muted);
+          font-weight: 700;
+          margin-left: 2px;
+        }
+
+        .sep {
+          color: var(--muted);
+          font-weight: 800;
+          margin: 0 2px;
+        }
+
+        .crossResult {
+          border: 1px solid var(--border);
+          border-radius: 12px;
+          padding: 10px 12px;
+          background: #ffffff;
+        }
+
+        .pillRow {
+          display: grid;
+          grid-template-columns: 1fr 1fr;
+          gap: 10px;
+        }
+
+        @media (max-width: 980px) {
+          .pillRow {
+            grid-template-columns: 1fr;
+          }
+        }
+
+        .pill {
+          border-radius: 14px;
+          padding: 10px 12px;
+          border: 1px solid var(--border);
+          background: #fbfbfc;
+        }
+
+        .pill.ok {
+          background: #eafff2;
+          border-color: #b7f7d0;
+        }
+
+        .pill.ng {
+          background: #ffecec;
+          border-color: #ffb9b9;
+        }
+
+        .pill.dim {
+          opacity: 0.7;
+        }
+
+        .pillTitle {
+          font-size: 12px;
+          color: var(--muted);
+          font-weight: 800;
+          margin-bottom: 6px;
+        }
+
+        .pillVal {
+          font-size: 14px;
+          font-weight: 900;
+        }
+
+        .pillSub {
+          margin-top: 4px;
+          font-size: 12px;
+          color: var(--muted);
+          font-weight: 700;
+        }
+
+        .note {
+          margin-top: 8px;
+          font-size: 12px;
+          color: var(--muted);
         }
       `}</style>
-    </div>
+    </main>
   );
 }
