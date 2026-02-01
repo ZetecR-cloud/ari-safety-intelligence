@@ -1,13 +1,16 @@
-// app/api/weather/route.ts
-
 import { NextResponse } from "next/server";
 import { judgeWx } from "@/app/lib/wx/wxJudge";
 
+/* =====================================================
+   Visibility parser
+   - 9999
+   - 10SM / 5SM (US METAR)
+===================================================== */
 function parseVisibility(token: string): string | null {
-  // 9999
+  // ICAO style
   if (/^\d{4}$/.test(token)) return token;
 
-  // 10SM / 5SM etc
+  // US style: 10SM
   const sm = token.match(/^(\d+)?SM$/);
   if (sm) {
     const miles = Number(sm[1] ?? 10);
@@ -18,12 +21,17 @@ function parseVisibility(token: string): string | null {
   return null;
 }
 
+/* =====================================================
+   QNH parser
+   - Q1013
+   - A3020 (inHg → hPa)
+===================================================== */
 function parseQnh(token: string): string | null {
-  // Q1013
+  // ICAO
   const q = token.match(/^Q(\d{4})$/);
   if (q) return q[1];
 
-  // A3020
+  // FAA
   const a = token.match(/^A(\d{4})$/);
   if (a) {
     const inHg = Number(a[1]) / 100;
@@ -34,18 +42,52 @@ function parseQnh(token: string): string | null {
   return null;
 }
 
+/* =====================================================
+   API
+===================================================== */
 export async function GET(req: Request) {
   const { searchParams } = new URL(req.url);
   const icao = searchParams.get("icao");
 
-  const res = await fetch(
-    `https://aviationweather.gov/api/data/metar?ids=${icao}&format=json`
-  );
-  const metars = await res.json();
-  const metar = metars[0];
+  if (!icao) {
+    return NextResponse.json(
+      { error: "ICAO code is required" },
+      { status: 400 }
+    );
+  }
 
-  const tokens = metar.rawOb.split(" ");
+  const upper = icao.toUpperCase();
 
+  /* -----------------------------
+     fetch METAR / TAF
+  ----------------------------- */
+  const metarURL = `https://aviationweather.gov/api/data/metar?ids=${upper}&format=json`;
+  const tafURL = `https://aviationweather.gov/api/data/taf?ids=${upper}&format=json`;
+
+  const [metarRes, tafRes] = await Promise.all([
+    fetch(metarURL, { cache: "no-store" }),
+    fetch(tafURL, { cache: "no-store" }),
+  ]);
+
+  const metarJson = await metarRes.json();
+  const tafJson = await tafRes.json();
+
+  const metar = metarJson?.[0];
+  const taf = tafJson?.[0];
+
+  if (!metar) {
+    return NextResponse.json(
+      { error: "METAR not available" },
+      { status: 404 }
+    );
+  }
+
+  const rawMetar: string = metar.rawOb;
+  const tokens = rawMetar.split(" ");
+
+  /* -----------------------------
+     visibility / qnh
+  ----------------------------- */
   let visibility: string | null = null;
   let qnh: string | null = null;
 
@@ -54,20 +96,34 @@ export async function GET(req: Request) {
     if (!qnh) qnh = parseQnh(t);
   }
 
+  /* -----------------------------
+     ICAO weather judgement
+     (唯一の ceiling 判定元)
+  ----------------------------- */
   const wx = judgeWx({
     clouds: metar.clouds,
   });
 
+  /* -----------------------------
+     response
+  ----------------------------- */
   return NextResponse.json({
+    status: "OK",
+    icao: upper,
+
     metar: {
       station_id: metar.icaoId,
       wind: metar.wdir + metar.wspd + "KT",
       visibility,
       altimeter: qnh,
       clouds: metar.clouds,
-      raw_text: metar.rawOb,
+      raw_text: rawMetar,
     },
+
+    taf: taf?.rawTAF ?? null,
+
     wx_analysis: wx,
-    taf: metar.taf,
+
+    time: new Date().toISOString(),
   });
 }
