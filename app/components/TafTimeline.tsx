@@ -1,6 +1,8 @@
 "use client";
 
-type Props = { rawTaf: string };
+type Props = {
+  rawTaf: string;
+};
 
 type Seg = {
   type: "BASE" | "FM" | "TEMPO" | "BECMG";
@@ -9,23 +11,25 @@ type Seg = {
 };
 
 function norm(s: string) {
-  return (s ?? "").replace(/\s+/g, " ").trim();
+  return (s ?? "").replace(/\s+/g, " ").trim().toUpperCase();
 }
 
 export default function TafTimeline({ rawTaf }: Props) {
   const taf = norm(rawTaf);
 
-  // ✅ TAF が無い時もUIが壊れない
+  // UIを壊さない
   if (!taf) return <div style={{ color: "#666" }}>TAF: —</div>;
 
   const tokens = taf.split(" ");
+
+  // BASEは常に先頭
   const timeline: Seg[] = [{ type: "BASE", label: "BASE" }];
 
   for (let i = 0; i < tokens.length; i++) {
     const t = tokens[i];
 
-    // FM012300 (ざっくり検出)
-    if (t.startsWith("FM") && /^FM\d{6}$/.test(t)) {
+    // FM012300
+    if (t.startsWith("FM") && /^FM\d{6,7}/.test(t)) {
       timeline.push({ type: "FM", label: t });
       continue;
     }
@@ -65,7 +69,7 @@ export default function TafTimeline({ rawTaf }: Props) {
                 : "#f2f8ff"
           }}
         >
-          <strong>{s.label}</strong>
+          <div style={{ fontWeight: 800 }}>{s.label}</div>
           {s.period ? <div style={{ fontSize: 12, marginTop: 4 }}>{s.period}</div> : null}
         </div>
       ))}
