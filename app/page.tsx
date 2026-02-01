@@ -132,6 +132,74 @@ type Components = {
   crossAbs: number;
 };
 
+function parseVisFromMetarRaw(raw: string): string | null {
+  const s = (raw || "").toUpperCase();
+
+  // US style: "10SM", "1/2SM", "3SM"
+  const sm = s.match(/\b(\d{1,2})(?:\s)?SM\b/);
+  if (sm) return `${sm[1]}SM`;
+  const frac = s.match(/\b(\d)\/(\d)SM\b/);
+  if (frac) return `${frac[1]}/${frac[2]}SM`;
+
+  // ICAO meters: "9999", "8000" etc
+  const m = s.match(/\b(\d{4})\b/);
+  // 4桁は他にも出る可能性あるが、VISはだいたい先頭寄りにあるので雑に拾うならこの程度でOK
+  if (m) return m[1];
+
+  return null;
+}
+
+function parseQnhFromMetarRaw(raw: string): string | null {
+  const s = (raw || "").toUpperCase();
+
+  // QNH: "Q1013"
+  const q = s.match(/\bQ(\d{4})\b/);
+  if (q) return q[1];
+
+  // US altimeter: "A3008" -> 30.08 inHg ≒ 1018 hPa
+  const a = s.match(/\bA(\d{4})\b/);
+  if (a) {
+    const inHg = Number(a[1]) / 100;
+    const hPa = inHg * 33.8638866667;
+    return String(Math.round(hPa));
+  }
+  return null;
+}
+
+function parseCloudsFromMetarRaw(raw: string): string[] {
+  const s = (raw || "").toUpperCase();
+  const clouds: string[] = [];
+
+  // CLR / SKC / NSC
+  if (/\bCLR\b/.test(s)) clouds.push("CLR");
+  if (/\bSKC\b/.test(s)) clouds.push("SKC");
+  if (/\bNSC\b/.test(s)) clouds.push("NSC");
+
+  // FEW/SCT/BKN/OVC/VV + 3 digits
+  const re = /\b(FEW|SCT|BKN|OVC|VV)(\d{3})\b/g;
+  let m: RegExpExecArray | null;
+  while ((m = re.exec(s)) !== null) clouds.push(`${m[1]}${m[2]}`);
+
+  return clouds;
+}
+
+// METARの気象現象（RA/SN/TS等）をざっくり拾う
+function parseWxPhenomenaFromMetarRaw(raw: string): string | null {
+  const s = (raw || "").toUpperCase();
+  if (!s) return null;
+
+  // 典型トークン例: -SHSN, +TSRA, SHRA, TSRASN, FZRA, BR, FG, HZ など
+  // まず強い現象（TS/SH + RA/SN等）
+  const strong = s.match(/\b(\+|-)?(TS|SH|FZ)?(RA|SN|DZ|SG|PL|GR|GS|IC|UP)([A-Z]{0,6})\b/);
+  if (strong) return (strong[1] || "") + (strong[2] || "") + strong[3] + (strong[4] || "");
+
+  // 次に視程障害系
+  const obsc = s.match(/\b(BR|FG|HZ|FU|DU|SA|VA)\b/);
+  if (obsc) return obsc[1];
+
+  return null;
+}
+
 function computeComponents(windDirDeg: number, windSpdKt: number, rwyMagDeg: number): Components {
   // 航空の風向きは "from"。滑走路進行方向へ投影。
   // angle = wind_from - runway_heading
