@@ -14,6 +14,7 @@ type WxResponse = {
   };
   taf: string | null;
   wx_analysis: {
+    level: "GREEN" | "AMBER" | "RED";
     reasons: string[];
     ceilingFt: number | null;
   };
@@ -26,14 +27,15 @@ export default function Page() {
   const [loading, setLoading] = useState(false);
 
   async function getWeather() {
-    if (!icao) return;
+    const code = icao.trim().toUpperCase();
+    if (!code) return;
 
     setLoading(true);
     setData(null);
 
     try {
-      const res = await fetch(`/api/weather?icao=${icao}`, {
-        cache: "no-store",
+      const res = await fetch(`/api/weather?icao=${encodeURIComponent(code)}`, {
+        cache: "no-store"
       });
 
       const json = await res.json();
@@ -49,32 +51,26 @@ export default function Page() {
 
   return (
     <main style={{ padding: 30, fontFamily: "sans-serif" }}>
-      {/* ICAO INPUT */}
-      <div style={{ marginBottom: 20 }}>
+      <div style={{ display: "flex", gap: 10, alignItems: "center", marginBottom: 20 }}>
+        <div style={{ width: 60, fontWeight: 800 }}>ICAO</div>
         <input
-          placeholder="ICAO (e.g. RJTT / KJFK)"
+          placeholder="RJTT / KJFK / ROAH"
           value={icao}
-          onChange={(e) => setIcao(e.target.value.toUpperCase())}
-          style={{ padding: 8, width: 200 }}
+          onChange={(e) => setIcao(e.target.value)}
+          style={{ padding: 10, width: 260 }}
         />
-        <button
-          onClick={getWeather}
-          style={{ marginLeft: 10, padding: "8px 16px" }}
-        >
+        <button onClick={getWeather} style={{ padding: "10px 14px", fontWeight: 700 }}>
           Get Weather
         </button>
       </div>
 
       {loading && <div>Loading…</div>}
+      {!loading && !data && <div>—</div>}
 
-      {!data && !loading && <div>—</div>}
-
-      {data && (
+      {data?.metar?.station_id && (
         <>
-          {/* KEY SUMMARY */}
           <h2>Key Summary</h2>
-
-          <div style={{ display: "grid", gap: 10, maxWidth: 500 }}>
+          <div style={{ display: "grid", gap: 8, maxWidth: 520 }}>
             <div>
               <strong>Station:</strong> {data.metar.station_id}
             </div>
@@ -82,48 +78,29 @@ export default function Page() {
               <strong>Wind:</strong> {data.metar.wind}
             </div>
             <div>
-              <strong>Visibility:</strong>{" "}
-              {data.metar.visibility ?? "—"}
+              <strong>Visibility:</strong> {data.metar.visibility ?? "—"}
             </div>
             <div>
               <strong>QNH:</strong> {data.metar.altimeter ?? "—"}
             </div>
             <div>
-              <strong>Clouds:</strong>{" "}
-              {data.metar.clouds.join(", ") || "—"}
+              <strong>Clouds:</strong> {(data.metar.clouds ?? []).join(", ") || "—"}
             </div>
           </div>
 
-          {/* RAW TEXT */}
           <h2 style={{ marginTop: 30 }}>METAR / TAF</h2>
-
           <div style={{ display: "flex", gap: 20 }}>
-            <pre
-              style={{
-                background: "#f6f6f6",
-                padding: 12,
-                width: "50%",
-                whiteSpace: "pre-wrap",
-              }}
-            >
+            <pre style={{ background: "#f6f6f6", padding: 12, width: "50%", whiteSpace: "pre-wrap" }}>
               {data.metar.raw_text}
             </pre>
-
-            <pre
-              style={{
-                background: "#f6f6f6",
-                padding: 12,
-                width: "50%",
-                whiteSpace: "pre-wrap",
-              }}
-            >
+            <pre style={{ background: "#f6f6f6", padding: 12, width: "50%", whiteSpace: "pre-wrap" }}>
               {data.taf ?? "NO TAF"}
             </pre>
           </div>
 
-          {/* REASONS */}
-          <h3 style={{ marginTop: 30 }}>判定理由（reasons）</h3>
-
+          <h3 style={{ marginTop: 30 }}>
+            判定理由（{data.wx_analysis?.level ?? "—"}）
+          </h3>
           {reasons.length === 0 ? (
             <div>—</div>
           ) : (
@@ -134,9 +111,7 @@ export default function Page() {
             </ul>
           )}
 
-          {/* TAF TIMELINE */}
           <h2 style={{ marginTop: 40 }}>TAF Timeline</h2>
-
           <TafTimeline rawTaf={data.taf ?? ""} />
         </>
       )}
