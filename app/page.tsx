@@ -1,7 +1,7 @@
 "use client";
 
 import { useState } from "react";
-import TafTimeline from "@/app/components/TafTimeline";
+import TafTimeline from "./components/TafTimeline";
 
 type WxResponse = {
   metar: {
