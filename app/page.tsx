@@ -2,7 +2,7 @@
 
 import React, { useMemo, useState } from "react";
 
-type WxLevel = "GREEN" | "AMBER" | "RED";
+type WxLevel = "GREEN" | "AMBER" | "RED" | "UNK";
 
 type WxResp = {
   status: "OK" | "NG";
@@ -10,6 +10,10 @@ type WxResp = {
   sources?: string[];
   metar?: {
     raw?: string;
+    wind?: string; // e.g. "09003KT" or "VRB03KT" or "22010G20KT"
+    visibility?: string;
+    qnh?: string;
+    clouds?: string[];
   };
   taf?: {
     raw?: string;
@@ -22,11 +26,11 @@ type WxResp = {
   error?: string;
 };
 
-/** ====== RWY MAG HDG DB（必要な空港から随時追加） ====== */
-type Rwy = { id: string; magDeg: number };
-type Airport = { name: string; runways: Rwy[] };
+type Runway = { id: string; magDeg: number };
+type AirportRWY = { name: string; runways: Runway[] };
 
-const RWY_DB: Record<string, Airport> = {
+// ====== RWY MAG HDG DB（必要に応じて増やす） ======
+const RWY_DB: Record<string, AirportRWY> = {
   RJTT: {
     name: "Tokyo Haneda",
     runways: [
@@ -56,10 +60,16 @@ const RWY_DB: Record<string, Airport> = {
       { id: "24", magDeg: 236 },
     ],
   },
+  // 追加例：
+  // RJAA: { name: "Narita", runways: [{ id:"16R", magDeg: 164 }, ...] }
 };
 
 function normIcao(s: string) {
   return (s || "").trim().toUpperCase();
+}
+
+function safeRound(n: number) {
+  return Math.round(n);
 }
 
 function clamp360(deg: number) {
@@ -68,10 +78,14 @@ function clamp360(deg: number) {
   return d;
 }
 
-/** a-b の最小角差（-180..+180） */
-function smallestAngleDiff(a: number, b: number) {
-  const d = clamp360(a) - clamp360(b);
-  return ((d + 540) % 360) - 180;
+// 角度差を -180..+180 に
+function angleDiffDeg(fromDeg: number, toDeg: number) {
+  // difference = from - to
+  const a = clamp360(fromDeg);
+  const b = clamp360(toDeg);
+  let d = a - b;
+  d = ((d + 540) % 360) - 180;
+  return d;
 }
 
 type WindParsed = {
@@ -85,166 +99,81 @@ function parseWindFromString(w: string | undefined): WindParsed | null {
   if (!w) return null;
   const s = w.trim().toUpperCase();
 
-  // VRBxxGyyKT / VRBxxKT
+  // VRBddKT / VRBddGggKT
   const vrb = s.match(/^VRB(\d{2,3})(G(\d{2,3}))?KT$/);
   if (vrb) {
     const spd = Number(vrb[1]);
-    const gust = vrb[3] ? Number(vrb[3]) : undefined;
-    return { dirDeg: null, spdKt: spd, gustKt: gust, isVrb: true };
+    const gst = vrb[3] ? Number(vrb[3]) : undefined;
+    return { dirDeg: null, spdKt: spd, gustKt: gst, isVrb: true };
   }
 
-  // dddssGggKT / dddssKT（speed/gust は 2-3 桁許容）
+  // dddssKT / dddssGggKT  (ss/gg can be 2-3 digits)
   const m = s.match(/^(\d{3})(\d{2,3})(G(\d{2,3}))?KT$/);
   if (!m) return null;
-
   const dir = Number(m[1]);
   const spd = Number(m[2]);
-  const gust = m[4] ? Number(m[4]) : undefined;
-  return { dirDeg: dir, spdKt: spd, gustKt: gust };
+  const gst = m[4] ? Number(m[4]) : undefined;
+  return { dirDeg: dir, spdKt: spd, gustKt: gst };
 }
 
-/** METAR RAW から「風」だけ抜く（dddssKT / dddssGggKT / VRBxxKT） */
-function windFromMetarRaw(raw: string | undefined): string | undefined {
-  if (!raw) return undefined;
-  const s = raw.toUpperCase();
+function extractWindFromMetar(metarRawOrWind: string | undefined): WindParsed | null {
+  if (!metarRawOrWind) return null;
+  const s = metarRawOrWind.toUpperCase();
 
-  // 例: "METAR RJNK 010700Z 27008KT 230V300 8000 ..."
-  // まず VRB を優先
-  const vrb = s.match(/\bVRB\d{2,3}(G\d{2,3})?KT\b/);
-  if (vrb) return vrb[0];
-
-  const m = s.match(/\b\d{3}\d{2,3}(G\d{2,3})?KT\b/);
-  if (m) return m[0];
-
-  return undefined;
+  // まず「dddssGggKT / dddssKT / VRBssKT」を拾う
+  const token = s.match(/\b(VRB\d{2,3}(G\d{2,3})?KT|\d{3}\d{2,3}(G\d{2,3})?KT)\b/);
+  if (!token) return null;
+  return parseWindFromString(token[1]);
 }
 
 type Components = {
-  head: number; // +headwind / -tailwind
-  cross: number; // +from right / -from left
+  head: number; // + headwind, - tailwind
+  cross: number; // + from RIGHT, - from LEFT
   crossAbs: number;
-  diffDeg: number | null; // wind - rwy (signed smallest)
-  sideText: string;
 };
 
-function computeComponents(wind: WindParsed, rwyMag: number): { steady: Components; gust?: Components; note?: string } {
-  // calm or 0kt
-  if (wind.spdKt <= 0) {
-    const z: Components = {
-      head: 0,
-      cross: 0,
-      crossAbs: 0,
-      diffDeg: null,
-      sideText: "CALM",
-    };
-    return { steady: z, gust: wind.gustKt ? z : undefined, note: "CALM" };
-  }
-
-  // VRB: worst-case crosswind = wind speed (90°), headwind = 0
-  if (wind.dirDeg === null) {
-    const make = (spd: number): Components => ({
-      head: 0,
-      cross: spd,
-      crossAbs: spd,
-      diffDeg: null,
-      sideText: "VRB (worst-case crosswind)",
-    });
-    return {
-      steady: make(wind.spdKt),
-      gust: wind.gustKt ? make(wind.gustKt) : undefined,
-      note: "VRB：厳密計算不可 → 最大横風=風速（最悪90°想定）",
-    };
-  }
-
-  const make = (spd: number): Components => {
-    const diff = smallestAngleDiff(wind.dirDeg as number, rwyMag); // wind - rwy
-    const rad = (Math.PI / 180) * diff;
-
-    // 風向は「吹いてくる方向」。RWYに対しての相対成分として sin/cos を使う
-    const head = spd * Math.cos(rad); // + headwind / - tailwind
-    const cross = spd * Math.sin(rad); // + from right / - from left
-    const crossAbs = Math.abs(cross);
-
-    let sideText = "nearly aligned";
-    if (cross > 0.5) sideText = "from RIGHT";
-    if (cross < -0.5) sideText = "from LEFT";
-
-    return {
-      head,
-      cross,
-      crossAbs,
-      diffDeg: diff,
-      sideText,
-    };
-  };
-
-  return {
-    steady: make(wind.spdKt),
-    gust: wind.gustKt ? make(wind.gustKt) : undefined,
-  };
+function computeComponents(windDirDeg: number, windSpdKt: number, rwyMagDeg: number): Components {
+  // 航空の風向きは "from"。滑走路進行方向へ投影。
+  // angle = wind_from - runway_heading
+  const d = angleDiffDeg(windDirDeg, rwyMagDeg);
+  const rad = (d * Math.PI) / 180;
+  const head = windSpdKt * Math.cos(rad);
+  const cross = windSpdKt * Math.sin(rad); // + from right, - from left
+  return { head, cross, crossAbs: Math.abs(cross) };
 }
 
-function fmtKt(x: number) {
-  const v = Math.round(Math.abs(x));
-  return `${v} kt`;
+function fmtSignedKt(n: number) {
+  const v = safeRound(n);
+  if (v === 0) return "0kt";
+  return v > 0 ? `+${v}kt` : `${v}kt`;
 }
 
-function fmtSignedKt(x: number, posLabel: string, negLabel: string) {
-  const v = Math.round(Math.abs(x));
-  if (x >= 0) return `${posLabel} ${v} kt`;
-  return `${negLabel} ${v} kt`;
+function fmtKt(n: number) {
+  return `${safeRound(n)}kt`;
 }
 
-function levelBadge(level?: WxLevel) {
-  const L = (level || "GREEN").toUpperCase() as WxLevel;
-  const map: Record<WxLevel, { text: string; bg: string; bd: string; fg: string }> = {
-    GREEN: { text: "WX LEVEL: GREEN  通常運航可（監視継続）", bg: "#e8f7ee", bd: "#bfe9cf", fg: "#0f5132" },
-    AMBER: { text: "WX LEVEL: AMBER  注意（条件確認・要監視）", bg: "#fff4e5", bd: "#ffd8a8", fg: "#7a4a00" },
-    RED: { text: "WX LEVEL: RED  危険（運航判断・代替検討）", bg: "#fdeaea", bd: "#f5b5b5", fg: "#842029" },
-  };
-  const s = map[L];
-  return (
-    <div style={{ display: "inline-flex", padding: "10px 14px", borderRadius: 999, background: s.bg, border: `1px solid ${s.bd}`, color: s.fg, fontWeight: 700 }}>
-      {s.text}
-    </div>
-  );
-}
-
-function cardStyle(): React.CSSProperties {
-  return {
-    background: "#fff",
-    border: "1px solid #eee",
-    borderRadius: 14,
-    padding: 16,
-    boxShadow: "0 1px 10px rgba(0,0,0,0.03)",
-  };
-}
-
-function labelStyle(): React.CSSProperties {
-  return { fontSize: 12, color: "#666", fontWeight: 600, marginBottom: 6 };
-}
-
-function bigStyle(): React.CSSProperties {
-  return { fontSize: 18, fontWeight: 800, letterSpacing: 0.2 };
+function levelBadge(level: WxLevel | undefined) {
+  const L = (level || "UNK").toUpperCase() as WxLevel;
+  if (L === "RED") return { text: "WX LEVEL: RED", cls: "red" };
+  if (L === "AMBER") return { text: "WX LEVEL: AMBER", cls: "amber" };
+  if (L === "GREEN") return { text: "WX LEVEL: GREEN", cls: "green" };
+  return { text: "WX LEVEL: UNK", cls: "unk" };
 }
 
 export default function Page() {
-  const [icao, setIcao] = useState("RJTT");
+  const [icao, setIcao] = useState("RJCC");
   const [loading, setLoading] = useState(false);
   const [data, setData] = useState<WxResp | null>(null);
   const [showRaw, setShowRaw] = useState(false);
 
-  // Crosswind UI
-  const [selectedRwy, setSelectedRwy] = useState<string>("");
-  const [manualRwyMag, setManualRwyMag] = useState<number>(0);
+  // Crosswind limit（任意）
   const [limitSteady, setLimitSteady] = useState<number>(30);
   const [limitGust, setLimitGust] = useState<number>(35);
 
   const icaoKey = useMemo(() => normIcao(icao), [icao]);
 
   const rwyList = useMemo(() => {
-    const entry = RWY_DB[icaoKey];
-    return entry?.runways || [];
+    return RWY_DB[icaoKey]?.runways || [];
   }, [icaoKey]);
 
   async function getWeather() {
@@ -252,19 +181,11 @@ export default function Page() {
     setData(null);
     try {
       const key = normIcao(icao);
-      const res = await fetch(`/api/weather?icao=${encodeURIComponent(key)}`, { cache: "no-store" });
+      const res = await fetch(`/api/weather?icao=${encodeURIComponent(key)}`, {
+        cache: "no-store",
+      });
       const json = (await res.json()) as WxResp;
       setData(json);
-
-      // RWY初期選択
-      const list = RWY_DB[key]?.runways || [];
-      if (list.length > 0) {
-        setSelectedRwy(list[0].id);
-        setManualRwyMag(0);
-      } else {
-        setSelectedRwy("");
-        setManualRwyMag(0);
-      }
     } catch (e: any) {
       setData({ status: "NG", error: String(e) });
     } finally {
@@ -275,353 +196,373 @@ export default function Page() {
   const metarRaw = data?.metar?.raw || "";
   const tafRaw = data?.taf?.raw || "";
 
-  // Wind parse
-  const windToken = useMemo(() => windFromMetarRaw(metarRaw), [metarRaw]);
-  const windParsed = useMemo(() => parseWindFromString(windToken), [windToken]);
+  const wxBadge = levelBadge(data?.wx_analysis?.level);
 
-  // Active runway mag
-  const activeRwyMag = useMemo(() => {
-    if (manualRwyMag && manualRwyMag > 0) return manualRwyMag;
-    const entry = RWY_DB[icaoKey];
-    const r = entry?.runways?.find((x) => x.id === selectedRwy);
-    return r?.magDeg || 0;
-  }, [icaoKey, selectedRwy, manualRwyMag]);
+  // Wind parse（metar.windがあればそれ優先、無ければ raw から拾う）
+  const windParsed = useMemo(() => {
+    const w = data?.metar?.wind || data?.metar?.raw || "";
+    return extractWindFromMetar(w);
+  }, [data]);
 
-  const cross = useMemo(() => {
-    if (!windParsed) return null;
-    if (!activeRwyMag) return null;
-    return computeComponents(windParsed, activeRwyMag);
-  }, [windParsed, activeRwyMag]);
+  // RWY別：steady/gust の成分を全部出す
+  const crosswindTable = useMemo(() => {
+    if (!windParsed) return [];
+    if (windParsed.dirDeg === null) {
+      // VRBは厳密計算不可 → “最大横風＝速度”で提示（保守的）
+      return rwyList.map((r) => {
+        const steadyCrossAbs = windParsed.spdKt;
+        const gustCrossAbs = windParsed.gustKt ?? null;
+        const worstAbs = Math.max(steadyCrossAbs, gustCrossAbs ?? 0);
+        return {
+          rwy: r.id,
+          mag: r.magDeg,
+          steadyHead: null,
+          steadyCross: null,
+          steadyCrossAbs,
+          gustHead: null,
+          gustCross: null,
+          gustCrossAbs: gustCrossAbs,
+          worstAbs,
+          note: "VRB: calc N/A (use speed as max xwind)",
+        };
+      });
+    }
 
-  function limitStatus(v: number, limit: number) {
-    if (v <= limit) return { text: "OK", color: "#0f5132", bg: "#e8f7ee", bd: "#bfe9cf" };
-    if (v <= limit + 3) return { text: "CAUTION", color: "#7a4a00", bg: "#fff4e5", bd: "#ffd8a8" };
-    return { text: "EXCEED", color: "#842029", bg: "#fdeaea", bd: "#f5b5b5" };
+    return rwyList.map((r) => {
+      const steady = computeComponents(windParsed.dirDeg as number, windParsed.spdKt, r.magDeg);
+      const gust = windParsed.gustKt
+        ? computeComponents(windParsed.dirDeg as number, windParsed.gustKt, r.magDeg)
+        : null;
+
+      const worstAbs = Math.max(steady.crossAbs, gust?.crossAbs ?? 0);
+
+      return {
+        rwy: r.id,
+        mag: r.magDeg,
+        steadyHead: steady.head,
+        steadyCross: steady.cross,
+        steadyCrossAbs: steady.crossAbs,
+        gustHead: gust?.head ?? null,
+        gustCross: gust?.cross ?? null,
+        gustCrossAbs: gust?.crossAbs ?? null,
+        worstAbs,
+        note: "",
+      };
+    });
+  }, [windParsed, rwyList]);
+
+  // ざっくり判定（limit）
+  function limitStatus(worstAbs: number, hasGust: boolean) {
+    const lim = hasGust ? limitGust : limitSteady;
+    if (worstAbs >= lim) return { text: "LIMIT", cls: "bad" };
+    if (worstAbs >= lim * 0.8) return { text: "NEAR", cls: "warn" };
+    return { text: "OK", cls: "ok" };
   }
 
-  const steadyCrossAbs = cross?.steady?.crossAbs ?? null;
-  const gustCrossAbs = cross?.gust?.crossAbs ?? null;
-
-  const steadyStat = steadyCrossAbs != null ? limitStatus(steadyCrossAbs, limitSteady) : null;
-  const gustStat = gustCrossAbs != null ? limitStatus(gustCrossAbs, limitGust) : null;
-
   return (
-    <main style={{ background: "#f7f7f8", minHeight: "100vh", padding: 24, fontFamily: "system-ui, -apple-system, Segoe UI, Roboto, sans-serif" }}>
-      <div style={{ maxWidth: 1120, margin: "0 auto", display: "flex", flexDirection: "column", gap: 14 }}>
-        {/* Header */}
-        <div style={cardStyle()}>
-          <div style={{ display: "flex", justifyContent: "space-between", gap: 12, alignItems: "flex-start", flexWrap: "wrap" }}>
-            <div>
-              <div style={{ fontSize: 28, fontWeight: 900 }}>ARI UI Test</div>
-              <div style={{ marginTop: 6, color: "#666", fontSize: 13 }}>ICAO入力 → METAR/TAF取得 → WX注意喚起（UI先行）</div>
-              <div style={{ marginTop: 12 }}>{levelBadge(data?.wx_analysis?.level)}</div>
-            </div>
-            <div style={{ color: "#666", fontSize: 12, marginTop: 8 }}>
-              Sources: {(data?.sources || ["metar", "taf", "aviationweather.gov"]).join(", ")}
+    <div className="wrap">
+      <style>{`
+        :root { color-scheme: light; }
+        .wrap { font-family: system-ui, -apple-system, Segoe UI, Roboto, sans-serif; padding: 28px; background: #f6f6f7; min-height: 100vh; }
+        .top { max-width: 1120px; margin: 0 auto; }
+        .header { display:flex; justify-content:space-between; align-items:flex-start; gap:16px; background:#fff; border:1px solid #e6e6ea; border-radius:18px; padding:18px 22px; }
+        h1 { margin:0; font-size:28px; }
+        .sub { margin-top:6px; font-size:13px; color:#555; }
+        .badge { display:inline-flex; align-items:center; gap:10px; padding:8px 12px; border-radius:999px; font-weight:700; font-size:13px; border:1px solid #eee; margin-top:12px; }
+        .green { background:#e8f7ee; color:#117a37; border-color:#bfe8cf; }
+        .amber { background:#fff3e5; color:#9a4a00; border-color:#ffd8b3; }
+        .red { background:#ffe9ea; color:#a1121a; border-color:#ffc0c4; }
+        .unk { background:#f0f0f2; color:#333; border-color:#e3e3e7; }
+
+        .panel { margin-top:16px; background:#fff; border:1px solid #e6e6ea; border-radius:18px; padding:18px 22px; }
+        .row { display:flex; gap:12px; align-items:center; flex-wrap:wrap; }
+        .input { flex:1; min-width: 260px; padding:12px 12px; border-radius:12px; border:1px solid #ddd; font-size:16px; }
+        .btn { padding:10px 14px; border-radius:12px; border:1px solid #ddd; background:#111; color:#fff; font-weight:700; cursor:pointer; }
+        .btn2 { padding:10px 14px; border-radius:12px; border:1px solid #ddd; background:#fff; color:#111; font-weight:700; cursor:pointer; }
+        .hint { font-size:12px; color:#666; margin-top:6px; }
+
+        .grid { display:grid; grid-template-columns: 1.05fr 1.3fr; gap:16px; margin-top:16px; }
+        @media (max-width: 980px) { .grid { grid-template-columns: 1fr; } }
+
+        .card { background:#fff; border:1px solid #e6e6ea; border-radius:18px; padding:16px 18px; }
+        .card h2 { margin:0 0 10px 0; font-size:16px; }
+        .kv { display:grid; grid-template-columns: 1fr 1fr; gap:10px; }
+        .kv .box { border:1px solid #eee; border-radius:14px; padding:12px; background:#fbfbfc; }
+        .k { font-size:12px; color:#555; font-weight:700; }
+        .v { margin-top:6px; font-size:16px; font-weight:800; }
+        .wide { grid-column: 1 / -1; }
+
+        .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace; font-size:12px; white-space:pre-wrap; word-break:break-word; background:#fbfbfc; border:1px solid #eee; border-radius:14px; padding:12px; }
+
+        .table { width:100%; border-collapse:separate; border-spacing:0; overflow:hidden; border:1px solid #eee; border-radius:14px; }
+        .table th, .table td { padding:10px 10px; border-bottom:1px solid #eee; font-size:13px; vertical-align:top; }
+        .table th { background:#fafafa; text-align:left; font-size:12px; color:#444; }
+        .table tr:last-child td { border-bottom:none; }
+        .tag { display:inline-flex; align-items:center; padding:4px 8px; border-radius:999px; font-size:12px; font-weight:800; border:1px solid #eee; }
+        .ok { background:#e8f7ee; color:#117a37; border-color:#bfe8cf; }
+        .warn { background:#fff3e5; color:#9a4a00; border-color:#ffd8b3; }
+        .bad { background:#ffe9ea; color:#a1121a; border-color:#ffc0c4; }
+
+        .small { font-size:12px; color:#666; }
+        .right { text-align:right; }
+      `}</style>
+
+      <div className="top">
+        <div className="header">
+          <div>
+            <h1>ARI UI Test</h1>
+            <div className="sub">ICAO入力 → METAR/TAF取得 → WX注意喚起（UI先行）</div>
+            <div className={`badge ${wxBadge.cls}`}>
+              {wxBadge.text}
+              <span className="small">注意（条件確認・要監視）</span>
             </div>
           </div>
+          <div className="small">Sources: metar, taf, aviationweather.gov</div>
         </div>
 
-        {/* Input */}
-        <div style={cardStyle()}>
-          <div style={{ display: "flex", gap: 12, alignItems: "center", flexWrap: "wrap" }}>
-            <div style={{ minWidth: 280, flex: "1 1 280px" }}>
-              <div style={labelStyle()}>ICAO</div>
-              <input
-                value={icao}
-                onChange={(e) => setIcao(e.target.value.toUpperCase())}
-                placeholder="RJTT / RJAA / KJFK"
-                style={{
-                  width: "100%",
-                  padding: "12px 12px",
-                  borderRadius: 10,
-                  border: "1px solid #ddd",
-                  outline: "none",
-                  fontSize: 16,
-                  fontWeight: 700,
-                }}
-              />
-              <div style={{ marginTop: 6, fontSize: 12, color: "#888" }}>例: RJTT / RJAA / KJFK</div>
-            </div>
-
-            <button
-              onClick={getWeather}
-              style={{
-                padding: "12px 16px",
-                borderRadius: 10,
-                border: "1px solid #111",
-                background: "#111",
-                color: "#fff",
-                fontWeight: 800,
-                cursor: "pointer",
-                minWidth: 140,
-              }}
-            >
+        <div className="panel">
+          <div className="row">
+            <div style={{ width: 80, fontWeight: 800 }}>ICAO</div>
+            <input
+              className="input"
+              value={icao}
+              onChange={(e) => setIcao(e.target.value.toUpperCase())}
+              placeholder="RJTT"
+            />
+            <button className="btn" onClick={getWeather} disabled={loading}>
               {loading ? "Loading..." : "Get Weather"}
             </button>
-
-            <button
-              onClick={() => setShowRaw((v) => !v)}
-              style={{
-                padding: "12px 16px",
-                borderRadius: 10,
-                border: "1px solid #ddd",
-                background: "#fff",
-                color: "#111",
-                fontWeight: 800,
-                cursor: "pointer",
-                minWidth: 120,
-              }}
-            >
+            <button className="btn2" onClick={() => setShowRaw((v) => !v)}>
               {showRaw ? "Hide Raw" : "Show Raw"}
             </button>
           </div>
+          <div className="hint">例: RJTT / RJAA / KJFK</div>
+          {data?.status === "NG" && (
+            <div className="hint" style={{ color: "#a1121a", marginTop: 10 }}>
+              Error: {data.error || "NG"}
+            </div>
+          )}
         </div>
 
-        {/* Grid: Key Summary + METAR/TAF */}
-        <div style={{ display: "grid", gridTemplateColumns: "1fr 1.3fr", gap: 14 }}>
+        <div className="grid">
           {/* Key Summary */}
-          <div style={cardStyle()}>
-            <div style={{ fontSize: 18, fontWeight: 900, marginBottom: 12 }}>Key Summary</div>
-
-            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10 }}>
-              <div style={{ ...cardStyle(), boxShadow: "none" }}>
-                <div style={labelStyle()}>Station</div>
-                <div style={bigStyle()}>{icaoKey || "-"}</div>
+          <div className="card">
+            <h2>Key Summary</h2>
+            <div className="kv">
+              <div className="box">
+                <div className="k">Station</div>
+                <div className="v">{data?.icao || icaoKey || "—"}</div>
               </div>
-              <div style={{ ...cardStyle(), boxShadow: "none" }}>
-                <div style={labelStyle()}>Wind</div>
-                <div style={bigStyle()}>{windToken || "-"}</div>
-              </div>
-
-              <div style={{ ...cardStyle(), boxShadow: "none" }}>
-                <div style={labelStyle()}>Visibility</div>
-                <div style={bigStyle()}>{(metarRaw.match(/\b(\d{4})\b/)?.[1] ?? "—")}</div>
-              </div>
-              <div style={{ ...cardStyle(), boxShadow: "none" }}>
-                <div style={labelStyle()}>QNH</div>
-                <div style={bigStyle()}>{(metarRaw.match(/\bQ(\d{4})\b/)?.[1] ?? "—")}</div>
-              </div>
-
-              <div style={{ gridColumn: "1 / -1", ...cardStyle(), boxShadow: "none" }}>
-                <div style={labelStyle()}>Clouds</div>
-                <div style={{ fontSize: 14, fontWeight: 800 }}>
-                  {metarRaw
-                    ? Array.from(metarRaw.toUpperCase().matchAll(/\b(FEW|SCT|BKN|OVC)\d{3}\b/g))
-                        .map((x) => x[0])
-                        .join(", ") || "—"
-                    : "—"}
+              <div className="box">
+                <div className="k">Wind</div>
+                <div className="v">
+                  {(() => {
+                    const w = windParsed
+                      ? windParsed.dirDeg === null
+                        ? `VRB${String(windParsed.spdKt).padStart(2, "0")}${windParsed.gustKt ? `G${windParsed.gustKt}` : ""}KT`
+                        : `${String(windParsed.dirDeg).padStart(3, "0")}${String(windParsed.spdKt).padStart(2, "0")}${windParsed.gustKt ? `G${windParsed.gustKt}` : ""}KT`
+                      : (data?.metar?.wind || "—");
+                    return w;
+                  })()}
                 </div>
               </div>
 
-              {/* ✅ ここが「雲の下に気象現象 (RA/SN/TS etc)」表示欄 */}
-              <div style={{ gridColumn: "1 / -1", ...cardStyle(), boxShadow: "none" }}>
-                <div style={labelStyle()}>WX (METAR)</div>
-                <div style={{ fontSize: 14, fontWeight: 800 }}>
-                  {metarRaw
-                    ? (() => {
-                        // METAR現象（簡易抽出）：-RA, +SN, TS, SHRA, FZRA, BR, FG など
-                        // できるだけ「現象だけ」拾う（風/雲/QNH/温度等は除外）
-                        const tokens = metarRaw
-                          .toUpperCase()
-                          .split(/\s+/)
-                          .filter(Boolean);
+              <div className="box">
+                <div className="k">Visibility</div>
+                <div className="v">{data?.metar?.visibility || "—"}</div>
+              </div>
+              <div className="box">
+                <div className="k">QNH</div>
+                <div className="v">{data?.metar?.qnh || "—"}</div>
+              </div>
 
-                        const wx = tokens.filter((t) => {
-                          // 代表的な現象パターン
-                          if (/^(-|\+)?(TS|SH|FZ)?(RA|SN|DZ|SG|PL|GR|GS)(TS)?$/.test(t)) return true; // -SHRASN 等を含む
-                          if (/^(TS|VCTS)$/.test(t)) return true;
-                          if (/^(BR|FG|FU|HZ|DU|SA|SQ|FC|SS|DS)$/.test(t)) return true;
-                          if (/^(-|\+)?(SH|FZ)?(RA|SN|DZ)$/.test(t)) return true;
-                          return false;
-                        });
+              <div className="box wide">
+                <div className="k">Clouds</div>
+                <div className="v">{(data?.metar?.clouds || []).join(", ") || "—"}</div>
+              </div>
 
-                        return wx.length ? wx.join(", ") : "—";
-                      })()
-                    : "—"}
+              {/* ★ここが要望の「Cloudsの下に現象（RA/SN/TS等）」 */}
+              <div className="box wide">
+                <div className="k">WX (METAR)</div>
+                <div className="v">
+                  {(() => {
+                    // METAR現象は raw から拾う（-SHSN / TS / RA / +SNRA など）
+                    const raw = (data?.metar?.raw || "").toUpperCase();
+                    if (!raw) return "—";
+                    const wx = raw.match(/\s(\+|-)?(TS|SH)?(RA|SN|DZ|SG|PL|GR|GS|IC|UP)([A-Z]{0,4})\s/);
+                    // 例: "-SHSN", "+TSRA", "SHRASN", "TSRASN" などをざっくり拾う
+                    if (wx) return (wx[1] || "") + (wx[2] || "") + wx[3] + (wx[4] || "");
+                    // もっと広く拾う： " -SHSN " のように単独トークンを探す
+                    const tokens = raw.split(/\s+/);
+                    const found = tokens.find((t) => /^(\+|-)?(TS|SH)?(RA|SN|DZ|SG|PL|GR|GS|IC|UP)[A-Z]*$/.test(t));
+                    return found || "—";
+                  })()}
                 </div>
               </div>
             </div>
 
-            <div style={{ marginTop: 10, fontSize: 12, color: "#888" }}>Updated (UTC): {data?.time || "—"}</div>
+            <div className="small" style={{ marginTop: 10 }}>
+              Updated (UTC): {data?.time || "—"}
+            </div>
           </div>
 
           {/* METAR / TAF */}
-          <div style={cardStyle()}>
-            <div style={{ fontSize: 18, fontWeight: 900, marginBottom: 6 }}>METAR / TAF</div>
-            <div style={{ fontSize: 12, color: "#888", marginBottom: 12 }}>原文はカード表示（折返し対応）</div>
-
-            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10 }}>
-              <div style={{ ...cardStyle(), boxShadow: "none" }}>
-                <div style={labelStyle()}>METAR RAW</div>
-                <div style={{ fontFamily: "ui-monospace, SFMono-Regular, Menlo, monospace", fontSize: 12, whiteSpace: "pre-wrap", lineHeight: 1.45 }}>
-                  {metarRaw || "—"}
-                </div>
+          <div className="card">
+            <h2>METAR / TAF</h2>
+            <div className="small" style={{ marginBottom: 8 }}>
+              原文はカード表示（折返し対応）
+            </div>
+            <div className="kv" style={{ gridTemplateColumns: "1fr 1fr" }}>
+              <div className="box">
+                <div className="k">METAR RAW</div>
+                <div className="mono">{metarRaw || "—"}</div>
               </div>
-              <div style={{ ...cardStyle(), boxShadow: "none" }}>
-                <div style={labelStyle()}>TAF RAW</div>
-                <div style={{ fontFamily: "ui-monospace, SFMono-Regular, Menlo, monospace", fontSize: 12, whiteSpace: "pre-wrap", lineHeight: 1.45 }}>
-                  {tafRaw || "—"}
-                </div>
+              <div className="box">
+                <div className="k">TAF RAW</div>
+                <div className="mono">{tafRaw || "—"}</div>
               </div>
             </div>
 
-            <div style={{ marginTop: 12, borderTop: "1px solid #eee", paddingTop: 10, display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap" }}>
-              <div style={{ fontSize: 13, fontWeight: 900 }}>判定理由（reasons） / {data?.wx_analysis?.level || "GREEN"}</div>
-              <div style={{ color: "#666", fontSize: 13 }}>
-                {(data?.wx_analysis?.reasons && data.wx_analysis.reasons.length > 0) ? (
-                  <ul style={{ margin: 0, paddingLeft: 18 }}>
-                    {data.wx_analysis.reasons.map((r, i) => (
-                      <li key={i}>{r}</li>
-                    ))}
-                  </ul>
+            <div style={{ marginTop: 10 }}>
+              <div className="k">判定理由（reasons） / {data?.wx_analysis?.level || "UNK"}</div>
+              <ul style={{ marginTop: 6 }}>
+                {(data?.wx_analysis?.reasons || []).length ? (
+                  (data?.wx_analysis?.reasons || []).map((r, i) => <li key={i}>{r}</li>)
                 ) : (
-                  <span>—</span>
+                  <li>—</li>
                 )}
-              </div>
+              </ul>
             </div>
+
+            {showRaw && (
+              <div style={{ marginTop: 10 }}>
+                <div className="k">RAW JSON</div>
+                <div className="mono">{JSON.stringify(data, null, 2)}</div>
+              </div>
+            )}
           </div>
         </div>
 
-        {/* ✅ Crosswind（RWY別 自動計算） */}
-        <div style={cardStyle()}>
-          <div style={{ fontSize: 18, fontWeight: 900, marginBottom: 6 }}>1️⃣ Crosswind（RWY別 自動計算）</div>
-          <div style={{ fontSize: 12, color: "#888", marginBottom: 12 }}>METAR風（dddssKT / dddssGggKT / VRBxxKT）からRWY磁方位に対する成分を計算</div>
+        {/* ===== Crosswind（RWY別 自動計算） ===== */}
+        <div className="card" style={{ marginTop: 16 }}>
+          <h2>Crosswind (RWY別 自動計算)</h2>
 
-          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 10, alignItems: "end" }}>
-            <div style={{ ...cardStyle(), boxShadow: "none" }}>
-              <div style={labelStyle()}>Runway（DBから選択）</div>
-              <select
-                value={selectedRwy}
-                onChange={(e) => setSelectedRwy(e.target.value)}
-                style={{ width: "100%", padding: 12, borderRadius: 10, border: "1px solid #ddd", fontWeight: 800 }}
-                disabled={rwyList.length === 0}
-              >
-                {rwyList.length === 0 ? <option value="">(RWY DBなし)</option> : null}
-                {rwyList.map((r) => (
-                  <option key={r.id} value={r.id}>
-                    RWY {r.id} (MAG {r.magDeg.toString().padStart(3, "0")}°)
-                  </option>
-                ))}
-              </select>
-              <div style={{ marginTop: 6, fontSize: 12, color: "#888" }}>
-                {RWY_DB[icaoKey]?.name ? `${RWY_DB[icaoKey].name}` : "空港DBが無い場合は右でManual入力"}
-              </div>
+          <div className="row" style={{ marginBottom: 10 }}>
+            <div className="small">
+              Airport RWY DB: <b>{icaoKey}</b>{" "}
+              {RWY_DB[icaoKey]?.name ? `(${RWY_DB[icaoKey].name})` : "(not registered)"}
             </div>
-
-            <div style={{ ...cardStyle(), boxShadow: "none" }}>
-              <div style={labelStyle()}>Manual RWY MAG（DB無い時/上書き）</div>
-              <input
-                type="number"
-                value={manualRwyMag || ""}
-                onChange={(e) => setManualRwyMag(Number(e.target.value))}
-                placeholder="例: 236"
-                style={{ width: "100%", padding: 12, borderRadius: 10, border: "1px solid #ddd", fontWeight: 800 }}
-              />
-              <div style={{ marginTop: 6, fontSize: 12, color: "#888" }}>0 または空欄なら DB/選択RWY を使用</div>
-            </div>
-
-            <div style={{ ...cardStyle(), boxShadow: "none" }}>
-              <div style={labelStyle()}>Crosswind Limit（kt）</div>
-              <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8 }}>
-                <div>
-                  <div style={{ fontSize: 12, color: "#666", fontWeight: 700 }}>Steady</div>
-                  <input
-                    type="number"
-                    value={limitSteady}
-                    onChange={(e) => setLimitSteady(Number(e.target.value))}
-                    style={{ width: "100%", padding: 12, borderRadius: 10, border: "1px solid #ddd", fontWeight: 800 }}
-                  />
-                </div>
-                <div>
-                  <div style={{ fontSize: 12, color: "#666", fontWeight: 700 }}>Gust</div>
-                  <input
-                    type="number"
-                    value={limitGust}
-                    onChange={(e) => setLimitGust(Number(e.target.value))}
-                    style={{ width: "100%", padding: 12, borderRadius: 10, border: "1px solid #ddd", fontWeight: 800 }}
-                  />
-                </div>
-              </div>
-            </div>
+            <div style={{ flex: 1 }} />
+            <div className="small">Limit steady</div>
+            <input
+              className="input"
+              style={{ width: 110, minWidth: 110 }}
+              value={limitSteady}
+              onChange={(e) => setLimitSteady(Number(e.target.value || 0))}
+              inputMode="numeric"
+            />
+            <div className="small">Limit gust</div>
+            <input
+              className="input"
+              style={{ width: 110, minWidth: 110 }}
+              value={limitGust}
+              onChange={(e) => setLimitGust(Number(e.target.value || 0))}
+              inputMode="numeric"
+            />
           </div>
 
-          <div style={{ marginTop: 12, display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10 }}>
-            <div style={{ ...cardStyle(), boxShadow: "none" }}>
-              <div style={labelStyle()}>Input</div>
-              <div style={{ fontSize: 14, fontWeight: 800 }}>METAR Wind: {windToken || "—"}</div>
-              <div style={{ fontSize: 14, fontWeight: 800, marginTop: 6 }}>
-                Active RWY MAG: {activeRwyMag ? `${activeRwyMag.toString().padStart(3, "0")}°` : "—"}
-              </div>
-              {cross?.note ? <div style={{ marginTop: 8, fontSize: 12, color: "#7a4a00" }}>{cross.note}</div> : null}
-              {!windParsed ? <div style={{ marginTop: 8, fontSize: 12, color: "#842029" }}>METAR から風を抽出できません（形式確認）</div> : null}
-              {windParsed && !activeRwyMag ? <div style={{ marginTop: 8, fontSize: 12, color: "#842029" }}>RWY MAG が未設定です（Manual入力 or DB追加）</div> : null}
+          {!windParsed && (
+            <div className="hint" style={{ color: "#a1121a" }}>
+              風情報が取れません（METAR RAWに "dddssKT / dddssGggKT / VRBssKT" が含まれているか確認）
             </div>
+          )}
 
-            <div style={{ ...cardStyle(), boxShadow: "none" }}>
-              <div style={labelStyle()}>Result</div>
+          {windParsed && rwyList.length === 0 && (
+            <div className="hint" style={{ color: "#9a4a00" }}>
+              {icaoKey} は RWY_DB に未登録です。RWY_DB に滑走路方位（MAG）を追加すると自動計算できます。
+            </div>
+          )}
 
-              {cross && steadyCrossAbs != null ? (
-                <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
-                  {/* Steady */}
-                  <div style={{ display: "flex", justifyContent: "space-between", gap: 12, alignItems: "center", flexWrap: "wrap" }}>
-                    <div style={{ fontSize: 14, fontWeight: 900 }}>Steady</div>
-                    {steadyStat ? (
-                      <div style={{ padding: "6px 10px", borderRadius: 999, border: `1px solid ${steadyStat.bd}`, background: steadyStat.bg, color: steadyStat.color, fontWeight: 900 }}>
-                        {steadyStat.text}
-                      </div>
-                    ) : null}
-                  </div>
-                  <div style={{ fontSize: 13, fontWeight: 800 }}>
-                    Head/Tail: {fmtSignedKt(cross.steady.head, "HW", "TW")} ・ Cross: {fmtKt(cross.steady.crossAbs)} ({cross.steady.sideText})
-                  </div>
-                  {cross.steady.diffDeg != null ? (
-                    <div style={{ fontSize: 12, color: "#666" }}>
-                      Relative angle (wind - rwy): {Math.round(cross.steady.diffDeg)}°
-                    </div>
-                  ) : null}
+          {windParsed && rwyList.length > 0 && (
+            <div style={{ overflowX: "auto" }}>
+              <table className="table">
+                <thead>
+                  <tr>
+                    <th>RWY</th>
+                    <th>MAG</th>
+                    <th>Steady Head/Tail</th>
+                    <th>Steady Xwind</th>
+                    <th>Gust Head/Tail</th>
+                    <th>Gust Xwind</th>
+                    <th className="right">Worst Xwind</th>
+                    <th>Status</th>
+                    <th>Note</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {crosswindTable.map((r) => {
+                    const hasGust = r.gustCrossAbs !== null && r.gustCrossAbs !== undefined;
+                    const st = limitStatus(r.worstAbs, hasGust);
+                    return (
+                      <tr key={r.rwy}>
+                        <td><b>{r.rwy}</b></td>
+                        <td>{r.mag}</td>
 
-                  {/* Gust */}
-                  {cross.gust && gustCrossAbs != null ? (
-                    <>
-                      <div style={{ height: 1, background: "#eee" }} />
-                      <div style={{ display: "flex", justifyContent: "space-between", gap: 12, alignItems: "center", flexWrap: "wrap" }}>
-                        <div style={{ fontSize: 14, fontWeight: 900 }}>Gust</div>
-                        {gustStat ? (
-                          <div style={{ padding: "6px 10px", borderRadius: 999, border: `1px solid ${gustStat.bd}`, background: gustStat.bg, color: gustStat.color, fontWeight: 900 }}>
-                            {gustStat.text}
+                        <td>
+                          {r.steadyHead === null ? "—" : fmtSignedKt(r.steadyHead)}
+                          <div className="small">{r.steadyHead !== null && (r.steadyHead >= 0 ? "Headwind" : "Tailwind")}</div>
+                        </td>
+                        <td>
+                          {r.steadyCross === null ? (fmtKt(r.steadyCrossAbs)) : fmtSignedKt(r.steadyCross)}
+                          <div className="small">
+                            {r.steadyCross === null ? "VRB conservative" : (r.steadyCross >= 0 ? "from RIGHT" : "from LEFT")}
+                            {" · "}
+                            |X| {fmtKt(r.steadyCrossAbs)}
                           </div>
-                        ) : null}
-                      </div>
-                      <div style={{ fontSize: 13, fontWeight: 800 }}>
-                        Head/Tail: {fmtSignedKt(cross.gust.head, "HW", "TW")} ・ Cross: {fmtKt(cross.gust.crossAbs)} ({cross.gust.sideText})
-                      </div>
-                    </>
-                  ) : (
-                    <div style={{ fontSize: 12, color: "#888" }}>Gust なし</div>
-                  )}
-                </div>
-              ) : (
-                <div style={{ fontSize: 13, color: "#888" }}>—</div>
-              )}
+                        </td>
+
+                        <td>
+                          {r.gustHead === null ? "—" : fmtSignedKt(r.gustHead)}
+                          <div className="small">{r.gustHead !== null && (r.gustHead >= 0 ? "Headwind" : "Tailwind")}</div>
+                        </td>
+                        <td>
+                          {r.gustCross === null
+                            ? (r.gustCrossAbs === null ? "—" : fmtKt(r.gustCrossAbs))
+                            : fmtSignedKt(r.gustCross)}
+                          <div className="small">
+                            {r.gustCross === null
+                              ? (r.gustCrossAbs === null ? "" : "VRB conservative")
+                              : (r.gustCross >= 0 ? "from RIGHT" : "from LEFT")}
+                            {r.gustCrossAbs !== null ? (
+                              <>
+                                {" · "} |X| {fmtKt(r.gustCrossAbs)}
+                              </>
+                            ) : null}
+                          </div>
+                        </td>
+
+                        <td className="right"><b>{fmtKt(r.worstAbs)}</b></td>
+                        <td><span className={`tag ${st.cls}`}>{st.text}</span></td>
+                        <td className="small">{r.note || "—"}</td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
             </div>
+          )}
+
+          <div className="small" style={{ marginTop: 10 }}>
+            * 風向は "from"（METAR表記）として計算。Crosswindは <b>+ = from RIGHT / - = from LEFT</b>。<br />
+            * VRBは正確計算不可なので、保守的に「横風最大＝速度（gustがあればgust）」で表示。
           </div>
         </div>
 
-        {/* Raw JSON */}
-        {showRaw ? (
-          <div style={cardStyle()}>
-            <div style={{ fontSize: 14, fontWeight: 900, marginBottom: 8 }}>RAW JSON</div>
-            <pre style={{ margin: 0, background: "#111", color: "#e8ffe8", padding: 16, borderRadius: 12, overflow: "auto", fontSize: 12 }}>
-              {JSON.stringify(data, null, 2)}
-            </pre>
-          </div>
-        ) : null}
-
-        <div style={{ fontSize: 12, color: "#888", padding: "6px 2px" }}>
-          ※ Crosswind は「METAR風 × RWY磁方位」から成分算出（VRBは最悪90°で最大横風=風速）。最終判断は運航規程・機種/滑走路条件で行ってください。
+        {/* 下部：ここは今後 TAF Timeline / その他コンポーネントを足す前提 */}
+        <div className="small" style={{ marginTop: 14 }}>
+          ※ 次フェーズで「RWY DB拡充」「ガスト steady/peak 別表示」「会社limitプリセット」を拡張できます。
         </div>
       </div>
-    </main>
+    </div>
   );
 }
