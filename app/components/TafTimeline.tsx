@@ -11,6 +11,7 @@ type Props = {
 };
 
 export default function TafTimeline({ rawTaf }: Props) {
+  // TAFが空ならUIは — のみ
   if (!rawTaf || rawTaf.trim() === "") {
     return <div>—</div>;
   }
@@ -22,10 +23,7 @@ export default function TafTimeline({ rawTaf }: Props) {
   // ============================
   // BASE is always present
   // ============================
-  timeline.push({
-    type: "BASE",
-    label: "BASE",
-  });
+  timeline.push({ type: "BASE", label: "BASE" });
 
   for (let i = 0; i < tokens.length; i++) {
     const t = tokens[i];
@@ -80,3 +78,13 @@ export default function TafTimeline({ rawTaf }: Props) {
                 ? "#fff4e6"
                 : "#f2e8ff",
           }}
+        >
+          <div style={{ fontWeight: 800 }}>{s.label}</div>
+          {s.period && (
+            <div style={{ fontSize: 12, marginTop: 4 }}>{s.period}</div>
+          )}
+        </div>
+      ))}
+    </div>
+  );
+}
