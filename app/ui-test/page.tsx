@@ -26,44 +26,26 @@ type WxResponse = {
   [k: string]: any;
 };
 
-function clsx(...xs: Array<string | false | null | undefined>) {
-  return xs.filter(Boolean).join(" ");
-}
-
 function safeUpper(s: string) {
   return (s ?? "").trim().toUpperCase();
 }
 
-function levelUi(level: WxLevel) {
+function normalizeLevel(lv?: string): WxLevel {
+  const x = (lv ?? "").toUpperCase();
+  if (x === "GREEN" || x === "AMBER" || x === "RED") return x;
+  return "UNKNOWN";
+}
+
+function levelCopy(level: WxLevel) {
   switch (level) {
     case "GREEN":
-      return {
-        badge: "bg-emerald-600 text-white",
-        ring: "ring-emerald-200",
-        title: "GREEN",
-        sub: "通常運航可（監視継続）",
-      };
+      return { label: "GREEN", desc: "通常運航可（監視継続）" };
     case "AMBER":
-      return {
-        badge: "bg-amber-500 text-white",
-        ring: "ring-amber-200",
-        title: "AMBER",
-        sub: "注意（要監視・条件確認）",
-      };
+      return { label: "AMBER", desc: "注意（条件確認・要監視）" };
     case "RED":
-      return {
-        badge: "bg-red-600 text-white",
-        ring: "ring-red-200",
-        title: "RED",
-        sub: "要判断（PIC/Dispatch Review）",
-      };
+      return { label: "RED", desc: "要判断（PIC/Dispatch Review）" };
     default:
-      return {
-        badge: "bg-zinc-600 text-white",
-        ring: "ring-zinc-200",
-        title: "UNKNOWN",
-        sub: "判定情報が不足しています",
-      };
+      return { label: "UNKNOWN", desc: "判定情報が不足しています" };
   }
 }
 
@@ -74,13 +56,22 @@ export default function UiTest() {
   const [err, setErr] = useState<string | null>(null);
   const [showRaw, setShowRaw] = useState(false);
 
-  const level: WxLevel = useMemo(() => {
-    const lv = data?.wx_analysis?.level;
-    if (lv === "GREEN" || lv === "AMBER" || lv === "RED") return lv;
-    return data ? "UNKNOWN" : "UNKNOWN";
-  }, [data]);
+  const level: WxLevel = useMemo(
+    () => normalizeLevel(data?.wx_analysis?.level),
+    [data]
+  );
+  const lv = levelCopy(level);
 
-  const ui = levelUi(level);
+  const metarRaw = data?.metar?.raw ?? "—";
+  const tafRaw = data?.taf ?? "—";
+
+  const station = data?.icao ?? "—";
+  const wind = data?.metar?.wind ?? "—";
+  const vis = data?.metar?.visibility ?? "—";
+  const qnh = data?.metar?.qnh ?? "—";
+  const clouds = data?.metar?.clouds?.length ? data.metar.clouds.join(", ") : "—";
+  const updated = data?.time ?? "—";
+  const reasons = data?.wx_analysis?.reasons ?? [];
 
   async function go() {
     const q = safeUpper(icao);
@@ -104,162 +95,365 @@ export default function UiTest() {
     }
   }
 
-  const metarRaw = data?.metar?.raw ?? "—";
-  const tafRaw = data?.taf ?? "—";
-  const reasons = data?.wx_analysis?.reasons ?? [];
-
   return (
-    <div className="min-h-screen bg-zinc-50 text-zinc-900">
-      {/* Header */}
-      <header className="border-b bg-white">
-        <div className="mx-auto max-w-6xl px-4 py-6">
-          <div className="flex flex-col gap-2 sm:flex-row sm:items-end sm:justify-between">
-            <div>
-              <h1 className="text-2xl font-semibold tracking-tight">ARI UI Test</h1>
-              <p className="text-sm text-zinc-600">
-                ICAO入力 → METAR/TAF取得 → WX注意喚起（UI先行）
-              </p>
+    <div className="page">
+      <style jsx>{`
+        .page {
+          min-height: 100vh;
+          background: #f6f7f8;
+          color: #111;
+          font-family: ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto,
+            Helvetica, Arial, "Apple Color Emoji", "Segoe UI Emoji";
+        }
+        .wrap {
+          max-width: 1080px;
+          margin: 0 auto;
+          padding: 20px 16px 40px;
+        }
+        .header {
+          background: #fff;
+          border: 1px solid #e6e6e6;
+          border-radius: 14px;
+          padding: 18px 16px;
+        }
+        .title {
+          font-size: 28px;
+          font-weight: 800;
+          margin: 0;
+          letter-spacing: -0.02em;
+        }
+        .subtitle {
+          margin-top: 6px;
+          font-size: 13px;
+          color: #555;
+        }
+        .toprow {
+          display: flex;
+          gap: 12px;
+          align-items: center;
+          justify-content: space-between;
+          flex-wrap: wrap;
+          margin-top: 14px;
+        }
+        .badge {
+          display: inline-flex;
+          align-items: center;
+          gap: 10px;
+          border-radius: 999px;
+          padding: 10px 14px;
+          font-weight: 800;
+          border: 1px solid #e6e6e6;
+        }
+        .badge small {
+          font-weight: 600;
+          color: rgba(255, 255, 255, 0.9);
+        }
+        .green {
+          background: #0f5132;
+          color: #d1e7dd;
+          border-color: #b7dfc6;
+        }
+        .amber {
+          background: #b45309;
+          color: #fffbeb;
+          border-color: #f5d090;
+        }
+        .red {
+          background: #991b1b;
+          color: #fee2e2;
+          border-color: #fecaca;
+        }
+        .unknown {
+          background: #3f3f46;
+          color: #f4f4f5;
+          border-color: #d4d4d8;
+        }
+
+        .controls {
+          margin-top: 14px;
+          background: #fff;
+          border: 1px solid #e6e6e6;
+          border-radius: 14px;
+          padding: 14px;
+        }
+        .row {
+          display: flex;
+          gap: 10px;
+          align-items: end;
+          flex-wrap: wrap;
+        }
+        label {
+          font-size: 12px;
+          font-weight: 700;
+          color: #444;
+          display: block;
+        }
+        input {
+          margin-top: 6px;
+          border: 1px solid #d4d4d8;
+          border-radius: 10px;
+          padding: 10px 12px;
+          font-size: 16px;
+          width: 220px;
+          outline: none;
+          background: #fff;
+        }
+        input:focus {
+          border-color: #a1a1aa;
+          box-shadow: 0 0 0 4px rgba(161, 161, 170, 0.2);
+        }
+        .hint {
+          margin-top: 6px;
+          font-size: 12px;
+          color: #666;
+        }
+        .btn {
+          border: 1px solid #e6e6e6;
+          border-radius: 10px;
+          padding: 10px 14px;
+          font-weight: 800;
+          cursor: pointer;
+          background: #111;
+          color: #fff;
+        }
+        .btn:disabled {
+          opacity: 0.6;
+          cursor: not-allowed;
+        }
+        .btn2 {
+          border: 1px solid #e6e6e6;
+          border-radius: 10px;
+          padding: 10px 14px;
+          font-weight: 800;
+          cursor: pointer;
+          background: #fff;
+          color: #111;
+        }
+
+        .grid {
+          display: grid;
+          grid-template-columns: 1fr;
+          gap: 12px;
+          margin-top: 14px;
+        }
+        @media (min-width: 900px) {
+          .grid {
+            grid-template-columns: 360px 1fr;
+          }
+        }
+
+        .card {
+          background: #fff;
+          border: 1px solid #e6e6e6;
+          border-radius: 14px;
+          padding: 14px;
+        }
+        .card h2 {
+          margin: 0;
+          font-size: 14px;
+          font-weight: 900;
+        }
+        .small {
+          font-size: 12px;
+          color: #666;
+        }
+
+        .kgrid {
+          display: grid;
+          grid-template-columns: repeat(2, minmax(0, 1fr));
+          gap: 10px;
+          margin-top: 12px;
+        }
+        .k {
+          background: #f8fafc;
+          border: 1px solid #e6e6e6;
+          border-radius: 12px;
+          padding: 10px;
+        }
+        .k .lab {
+          font-size: 11px;
+          color: #666;
+          font-weight: 800;
+        }
+        .k .val {
+          margin-top: 4px;
+          font-size: 16px;
+          font-weight: 900;
+        }
+
+        .twocol {
+          display: grid;
+          grid-template-columns: 1fr;
+          gap: 10px;
+          margin-top: 12px;
+        }
+        @media (min-width: 900px) {
+          .twocol {
+            grid-template-columns: 1fr 1fr;
+          }
+        }
+        pre {
+          white-space: pre-wrap;
+          word-break: break-word;
+          margin: 0;
+          font-size: 12px;
+          line-height: 1.45;
+        }
+        .prebox {
+          background: #f8fafc;
+          border: 1px solid #e6e6e6;
+          border-radius: 12px;
+          padding: 10px;
+        }
+
+        .rawjson {
+          margin-top: 10px;
+          background: #0b1220;
+          color: #6ef08f;
+          border: 1px solid #1f2937;
+          border-radius: 12px;
+          padding: 10px;
+          max-height: 420px;
+          overflow: auto;
+        }
+
+        .error {
+          margin-top: 12px;
+          border: 1px solid #fecaca;
+          background: #fef2f2;
+          color: #7f1d1d;
+          border-radius: 12px;
+          padding: 10px 12px;
+          font-size: 13px;
+          font-weight: 700;
+        }
+        .footer {
+          margin-top: 14px;
+          font-size: 12px;
+          color: #666;
+        }
+      `}</style>
+
+      <div className="wrap">
+        {/* Header */}
+        <div className="header">
+          <h1 className="title">ARI UI Test</h1>
+          <div className="subtitle">ICAO入力 → METAR/TAF取得 → WX注意喚起（UI先行）</div>
+
+          <div className="toprow">
+            <div
+              className={
+                "badge " +
+                (level === "GREEN"
+                  ? "green"
+                  : level === "AMBER"
+                  ? "amber"
+                  : level === "RED"
+                  ? "red"
+                  : "unknown")
+              }
+              aria-label={`WX LEVEL ${lv.label}`}
+            >
+              WX LEVEL: {lv.label} <small>{lv.desc}</small>
             </div>
 
-            <div
-              className={clsx(
-                "rounded-2xl bg-white px-4 py-3 shadow-sm ring-1",
-                ui.ring
-              )}
-            >
-              <div className="flex items-center gap-3">
-                <span className={clsx("rounded-full px-3 py-1 text-sm font-semibold", ui.badge)}>
-                  WX LEVEL: {ui.title}
-                </span>
-                <span className="text-sm text-zinc-600">{ui.sub}</span>
-              </div>
+            <div className="small">
+              Sources: {(data?.sources ?? []).join(", ") || "—"}
             </div>
           </div>
         </div>
-      </header>
 
-      {/* Body */}
-      <main className="mx-auto max-w-6xl px-4 py-6">
-        {/* Search */}
-        <div className="rounded-2xl bg-white p-4 shadow-sm ring-1 ring-zinc-200">
-          <div className="flex flex-col gap-3 sm:flex-row sm:items-end">
-            <div className="flex-1">
-              <label className="text-xs font-medium text-zinc-700">ICAO</label>
+        {/* Controls */}
+        <div className="controls">
+          <div className="row">
+            <div>
+              <label>ICAO</label>
               <input
                 value={icao}
                 onChange={(e) => setIcao(e.target.value.toUpperCase())}
                 placeholder="RJTT"
-                className="mt-1 w-full rounded-xl border border-zinc-300 bg-white px-4 py-3 text-base outline-none focus:border-zinc-400 focus:ring-2 focus:ring-zinc-200"
               />
-              <p className="mt-1 text-xs text-zinc-500">例: RJTT / RJAA / KJFK</p>
+              <div className="hint">例: RJTT / RJAA / KJFK</div>
             </div>
 
-            <div className="flex gap-2">
-              <button
-                onClick={go}
-                disabled={loading}
-                className={clsx(
-                  "rounded-xl px-5 py-3 text-sm font-semibold shadow-sm ring-1 ring-zinc-200",
-                  loading
-                    ? "bg-zinc-200 text-zinc-600"
-                    : "bg-zinc-900 text-white hover:bg-zinc-800"
-                )}
-              >
-                {loading ? "Fetching..." : "Get Weather"}
-              </button>
+            <button className="btn" onClick={go} disabled={loading}>
+              {loading ? "Fetching..." : "Get Weather"}
+            </button>
 
-              <button
-                onClick={() => setShowRaw((v) => !v)}
-                className="rounded-xl bg-white px-4 py-3 text-sm font-semibold text-zinc-900 shadow-sm ring-1 ring-zinc-200 hover:bg-zinc-50"
-              >
-                {showRaw ? "Hide Raw" : "Show Raw"}
-              </button>
-            </div>
+            <button className="btn2" onClick={() => setShowRaw((v) => !v)}>
+              {showRaw ? "Hide Raw" : "Show Raw"}
+            </button>
           </div>
 
-          {err && (
-            <div className="mt-4 rounded-xl border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-800">
-              <div className="font-semibold">Error</div>
-              <div className="mt-1">{err}</div>
-            </div>
-          )}
+          {err && <div className="error">Error: {err}</div>}
         </div>
 
-        {/* Summary */}
-        <div className="mt-6 grid gap-4 lg:grid-cols-3">
-          <section className="rounded-2xl bg-white p-4 shadow-sm ring-1 ring-zinc-200 lg:col-span-1">
-            <h2 className="text-sm font-semibold">Key Summary</h2>
+        {/* Main Grid */}
+        <div className="grid">
+          {/* Key Summary */}
+          <div className="card">
+            <h2>Key Summary</h2>
 
-            <div className="mt-3 space-y-3 text-sm">
-              <div className="rounded-xl bg-zinc-50 p-3 ring-1 ring-zinc-200">
-                <div className="text-xs text-zinc-500">Station</div>
-                <div className="mt-1 font-semibold">{data?.icao ?? "—"}</div>
+            <div className="kgrid">
+              <div className="k">
+                <div className="lab">Station</div>
+                <div className="val">{station}</div>
               </div>
-
-              <div className="rounded-xl bg-zinc-50 p-3 ring-1 ring-zinc-200">
-                <div className="text-xs text-zinc-500">Wind</div>
-                <div className="mt-1 font-semibold">{data?.metar?.wind ?? "—"}</div>
+              <div className="k">
+                <div className="lab">Wind</div>
+                <div className="val">{wind}</div>
               </div>
-
-              <div className="rounded-xl bg-zinc-50 p-3 ring-1 ring-zinc-200">
-                <div className="text-xs text-zinc-500">Visibility</div>
-                <div className="mt-1 font-semibold">{data?.metar?.visibility ?? "—"}</div>
+              <div className="k">
+                <div className="lab">Visibility</div>
+                <div className="val">{vis}</div>
               </div>
-
-              <div className="rounded-xl bg-zinc-50 p-3 ring-1 ring-zinc-200">
-                <div className="text-xs text-zinc-500">QNH</div>
-                <div className="mt-1 font-semibold">{data?.metar?.qnh ?? "—"}</div>
+              <div className="k">
+                <div className="lab">QNH</div>
+                <div className="val">{qnh}</div>
               </div>
+              <div className="k" style={{ gridColumn: "1 / -1" }}>
+                <div className="lab">Clouds</div>
+                <div className="val">{clouds}</div>
+              </div>
+            </div>
 
-              <div className="rounded-xl bg-zinc-50 p-3 ring-1 ring-zinc-200">
-                <div className="text-xs text-zinc-500">Clouds</div>
-                <div className="mt-1 font-semibold">
-                  {data?.metar?.clouds?.length ? data.metar.clouds.join(", ") : "—"}
+            <div className="footer">Updated (UTC): {updated}</div>
+          </div>
+
+          {/* METAR / TAF */}
+          <div className="card">
+            <h2>METAR / TAF</h2>
+            <div className="small">原文はカード表示（折返し対応）</div>
+
+            <div className="twocol">
+              <div className="prebox">
+                <div className="small" style={{ fontWeight: 900, marginBottom: 6 }}>
+                  METAR RAW
                 </div>
+                <pre>{metarRaw}</pre>
               </div>
 
-              <div className="text-xs text-zinc-500">Updated: {data?.time ?? "—"}</div>
-            </div>
-          </section>
-
-          <section className="rounded-2xl bg-white p-4 shadow-sm ring-1 ring-zinc-200 lg:col-span-2">
-            <div className="flex items-center justify-between gap-3">
-              <h2 className="text-sm font-semibold">METAR / TAF</h2>
-              <div className="text-xs text-zinc-500">原文はカード表示（折返し対応）</div>
-            </div>
-
-            <div className="mt-4 grid gap-4 md:grid-cols-2">
-              <div className="rounded-2xl bg-zinc-50 p-4 ring-1 ring-zinc-200">
-                <div className="mb-2 text-xs font-semibold text-zinc-700">METAR RAW</div>
-                <pre className="whitespace-pre-wrap break-words rounded-xl bg-white p-3 text-xs leading-relaxed ring-1 ring-zinc-200">
-                  {metarRaw}
-                </pre>
-              </div>
-
-              <div className="rounded-2xl bg-zinc-50 p-4 ring-1 ring-zinc-200">
-                <div className="mb-2 text-xs font-semibold text-zinc-700">TAF RAW</div>
-                <pre className="whitespace-pre-wrap break-words rounded-xl bg-white p-3 text-xs leading-relaxed ring-1 ring-zinc-200">
-                  {tafRaw}
-                </pre>
+              <div className="prebox">
+                <div className="small" style={{ fontWeight: 900, marginBottom: 6 }}>
+                  TAF RAW
+                </div>
+                <pre>{tafRaw}</pre>
               </div>
             </div>
 
-            <div className="mt-4 rounded-2xl bg-white p-4 ring-1 ring-zinc-200">
-              <div className="flex items-center justify-between">
-                <div className="text-sm font-semibold">判定理由（reasons）</div>
-                <span className={clsx("rounded-full px-3 py-1 text-xs font-semibold", ui.badge)}>
-                  {ui.title}
-                </span>
+            <div style={{ marginTop: 12 }}>
+              <div className="small" style={{ fontWeight: 900 }}>
+                判定理由（reasons） / {lv.label}
               </div>
 
               {reasons.length === 0 ? (
-                <p className="mt-2 text-sm text-zinc-600">
+                <div className="small" style={{ marginTop: 6 }}>
                   まだ理由がありません（解析ロジックは次フェーズで追加します）。
-                </p>
+                </div>
               ) : (
-                <ul className="mt-3 space-y-2">
+                <ul style={{ marginTop: 8, paddingLeft: 18 }}>
                   {reasons.map((r, i) => (
-                    <li key={i} className="rounded-xl bg-zinc-50 px-3 py-2 text-sm ring-1 ring-zinc-200">
+                    <li key={i} className="small" style={{ marginBottom: 6 }}>
                       {r}
                     </li>
                   ))}
@@ -268,20 +462,15 @@ export default function UiTest() {
             </div>
 
             {showRaw && (
-              <div className="mt-4 rounded-2xl bg-zinc-50 p-4 ring-1 ring-zinc-200">
-                <div className="mb-2 text-xs font-semibold text-zinc-700">RAW JSON</div>
-                <pre className="max-h-[420px] overflow-auto rounded-xl bg-zinc-950 p-3 text-xs text-green-300">
-                  {JSON.stringify(data ?? {}, null, 2)}
-                </pre>
-              </div>
+              <pre className="rawjson">{JSON.stringify(data ?? {}, null, 2)}</pre>
             )}
-          </section>
+          </div>
         </div>
 
-        <div className="mt-6 text-xs text-zinc-500">
+        <div className="footer">
           ※ 次フェーズで「TAF時系列」「Crosswind」「TS/CB即RED」「Alternate minima」を追加します。
         </div>
-      </main>
+      </div>
     </div>
   );
 }
