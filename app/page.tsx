@@ -1,7 +1,7 @@
 "use client";
 
 import { useState } from "react";
-import TafTimeline from "../components/TafTimeline";
+import TafTimeline from "./components/TafTimeline";
 
 /* ===============================
    ICAO CEILING RULE
@@ -36,7 +36,7 @@ export default function Page() {
     const res = await fetch(`/api/weather?icao=${icao}`);
     const json = await res.json();
 
-    // 🔥 サーバ理由を完全破棄
+    // 🔥 サーバ由来 reasons を完全無効化
     if (json?.wx_analysis?.reasons) {
       json.wx_analysis.reasons = [];
     }
@@ -44,6 +44,10 @@ export default function Page() {
     setData(json);
     setLoading(false);
   }
+
+  /* ===============================
+     DERIVED
+  ================================ */
 
   const clouds = data?.metar?.clouds ?? [];
   const ceilingFt = extractCeilingFt(clouds);
@@ -54,9 +58,13 @@ export default function Page() {
     reasons.push(`Ceiling present (<3000ft): ${ceilingFt}ft`);
   }
 
+  /* ===============================
+     UI
+  ================================ */
+
   return (
-    <main style={{ padding: 30 }}>
-      <h1>ARI5 UI TEST</h1>
+    <main style={{ padding: 30, fontFamily: "sans-serif" }}>
+      <h1>ARI5 Weather</h1>
 
       <div style={{ marginBottom: 20 }}>
         <input
@@ -65,11 +73,12 @@ export default function Page() {
           onChange={(e) => setIcao(e.target.value.toUpperCase())}
           style={{ padding: 8 }}
         />
+
         <button
           onClick={getWeather}
           style={{ marginLeft: 10, padding: "8px 16px" }}
         >
-          Get Weather
+          {loading ? "Loading..." : "Get Weather"}
         </button>
       </div>
 
@@ -79,7 +88,7 @@ export default function Page() {
           <div>Station: {data.metar.station_id}</div>
           <div>Clouds: {clouds.join(", ")}</div>
 
-          <h3>判定理由（AMBER）</h3>
+          <h3 style={{ marginTop: 20 }}>判定理由（AMBER）</h3>
 
           {reasons.length === 0 ? (
             <div>—</div>
@@ -99,4 +108,3 @@ export default function Page() {
     </main>
   );
 }
-
