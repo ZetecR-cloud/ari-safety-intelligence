@@ -47,6 +47,44 @@ function normalizeLevel(lv?: string): WxLevel {
   return "UNKNOWN";
 }
 
+function parseMetarWxTokens(metarRaw: string): string[] {
+  const raw = (metarRaw ?? "").trim().toUpperCase().replace(/\s+/g, " ");
+  if (!raw || raw === "—") return [];
+
+  const tokens = raw.split(" ");
+
+  // METAR weather groups (WMO/ICAO)
+  // intensity/proximity: -, +, VC
+  // descriptor: MI PR BC DR BL SH TS FZ
+  // phenomena: DZ RA SN SG IC PL GR GS UP BR FG FU VA DU SA HZ PO SQ FC SS DS
+  const wxRe =
+    /^(?:\+|-|VC)?(?:MI|PR|BC|DR|BL|SH|TS|FZ)?(?:DZ|RA|SN|SG|IC|PL|GR|GS|UP|BR|FG|FU|VA|DU|SA|HZ|PO|SQ|FC|SS|DS){1,3}$/;
+
+  const result: string[] = [];
+  for (const t of tokens) {
+    // stop at remarks
+    if (t === "RMK") break;
+
+    // skip common non-wx groups
+    if (t === "METAR" || t === "SPECI" || /^[A-Z]{4}$/.test(t)) continue; // ICAO
+    if (/^\d{6}Z$/.test(t)) continue; // time
+    if (/^\d{3}(?:\d{2,3})G?\d{2,3}KT$/.test(t)) continue; // wind
+    if (/^(?:CAVOK|\d{4}|9999)$/.test(t)) continue; // visibility (rough)
+    if (/^R\d{2}[LRC]?\/\d{4}[V\d{4}]?FT?$/.test(t)) continue; // RVR (rough)
+    if (/^(?:M?\d{2})\/(?:M?\d{2})$/.test(t)) continue; // temp/dew
+    if (/^(?:Q|A)\d{4}$/.test(t)) continue; // QNH/QFE/Altimeter
+    if (/^(?:FEW|SCT|BKN|OVC|VV)\d{3}/.test(t)) continue; // cloud groups
+
+    // now capture weather groups
+    if (wxRe.test(t)) {
+      result.push(t);
+    }
+  }
+
+  // unique + keep order
+  return Array.from(new Set(result));
+}
+
 function levelCopy(level: WxLevel) {
   switch (level) {
     case "GREEN":
