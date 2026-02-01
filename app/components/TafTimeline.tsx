@@ -5,14 +5,20 @@ type Props = {
 };
 
 export default function TafTimeline({ rawTaf }: Props) {
-  if (!rawTaf) {
+  if (!rawTaf || rawTaf.trim() === "") {
     return <div>—</div>;
   }
 
   const tokens = rawTaf.split(/\s+/);
-  const timeline: any[] = [];
+  const timeline: {
+    type: "BASE" | "BECMG" | "TEMPO" | "FM";
+    label: string;
+    period?: string;
+  }[] = [];
 
-  // ✅ BASEは必ず存在
+  /* ===============================
+     BASE is ALWAYS present
+  ================================ */
   timeline.push({
     type: "BASE",
     label: "BASE",
@@ -46,22 +52,31 @@ export default function TafTimeline({ rawTaf }: Props) {
   }
 
   return (
-    <div style={{ display: "flex", gap: 12 }}>
+    <div style={{ display: "flex", gap: 12, flexWrap: "wrap" }}>
       {timeline.map((p, i) => (
         <div
           key={i}
           style={{
-            border: "1px solid #999",
-            padding: 12,
-            borderRadius: 6,
-            minWidth: 90,
+            border: "1px solid #ccc",
+            padding: "10px 14px",
+            borderRadius: 10,
+            minWidth: 110,
+            background:
+              p.type === "BASE"
+                ? "#eef3ff"
+                : p.type === "BECMG"
+                ? "#e9f7ee"
+                : p.type === "TEMPO"
+                ? "#fff4e6"
+                : "#f0f6ff",
           }}
         >
-          <strong>{p.label}</strong>
-          {p.period && <div>{p.period}</div>}
+          <div style={{ fontWeight: 800 }}>{p.label}</div>
+          {p.period && (
+            <div style={{ fontSize: 12, marginTop: 4 }}>{p.period}</div>
+          )}
         </div>
       ))}
     </div>
   );
 }
-
