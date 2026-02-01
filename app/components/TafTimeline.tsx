@@ -1,13 +1,13 @@
 "use client";
 
-type Props = {
-  rawTaf: string;
-};
-
 type Segment = {
   type: "BASE" | "BECMG" | "TEMPO" | "FM";
   label: string;
   period?: string;
+};
+
+type Props = {
+  rawTaf: string;
 };
 
 export default function TafTimeline({ rawTaf }: Props) {
@@ -16,9 +16,12 @@ export default function TafTimeline({ rawTaf }: Props) {
   }
 
   const tokens = rawTaf.split(/\s+/);
+
   const timeline: Segment[] = [];
 
+  // ============================
   // BASE is always present
+  // ============================
   timeline.push({
     type: "BASE",
     label: "BASE",
@@ -27,31 +30,38 @@ export default function TafTimeline({ rawTaf }: Props) {
   for (let i = 0; i < tokens.length; i++) {
     const t = tokens[i];
 
-    if (t === "BECMG") {
+    // FM012300
+    if (t.startsWith("FM")) {
       timeline.push({
-        type: "BECMG",
-        label: "BECMG",
-        period: tokens[i + 1],
+        type: "FM",
+        label: "FM",
+        period: t.replace("FM", ""),
       });
+      continue;
     }
 
-    if (t === "TEMPO") {
+    // TEMPO 0112/0118
+    if (t === "TEMPO" && tokens[i + 1]) {
       timeline.push({
         type: "TEMPO",
         label: "TEMPO",
         period: tokens[i + 1],
       });
+      continue;
     }
 
-    if (t.startsWith("FM")) {
+    // BECMG 0200/0203
+    if (t === "BECMG" && tokens[i + 1]) {
       timeline.push({
-        type: "FM",
-        label: t,
+        type: "BECMG",
+        label: "BECMG",
+        period: tokens[i + 1],
       });
+      continue;
     }
   }
 
-   return (
+  return (
     <div style={{ display: "flex", gap: 12, flexWrap: "wrap" }}>
       {timeline.map((s, i) => (
         <div
@@ -60,13 +70,13 @@ export default function TafTimeline({ rawTaf }: Props) {
             border: "1px solid #ccc",
             padding: "10px 12px",
             borderRadius: 8,
-            minWidth: 90,
-            background: "#fafafa",
+            minWidth: 100,
+            background:
+              s.type === "BASE"
+                ? "#eef3ff"
+                : s.type === "BECMG"
+                ? "#e9f7ee"
+                : s.type === "TEMPO"
+                ? "#fff4e6"
+                : "#f2e8ff",
           }}
-        >
-          <strong>{s.label}</strong>
-          {s.period && <div>{s.period}</div>}
-        </div>
-      ))}
-    </div>
-  );
