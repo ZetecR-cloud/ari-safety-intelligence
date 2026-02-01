@@ -1,8 +1,9 @@
+// app/api/weather/route.ts
 import { NextResponse } from "next/server";
 import { judgeWx } from "@/app/lib/wx/wxJudge";
 
 type AwMetar = {
-  rawOb?: string;
+  rawOb: string;
   icaoId?: string;
   wdir?: string;
   wspd?: string;
@@ -10,20 +11,24 @@ type AwMetar = {
 };
 
 type AwTaf = {
-  rawTAF?: string;
+  rawTAF: string;
 };
 
 function parseVisibility(token: string): string | null {
-  // ICAO: 9999 / 8000 etc
+  // ICAO style: 9999 / 8000 / 3000 etc
   if (/^\d{4}$/.test(token)) return token;
 
-  // US style: 10SM / 5SM / 1/2SM etc  → 目安として "SM"表記をそのまま返す
-  const sm = token.match(/^(\d+)(SM)$/);
-  if (sm) return `${sm[1]}SM`;
-
-  // 1/2SM など
-  const frac = token.match(/^(\d+)\/(\d+)SM$/);
-  if (frac) return `${frac[1]}/${frac[2]}SM`;
+  // FAA style: 10SM / 5SM / 1SM etc
+  // (no fractions handled here; keep robust)
+  const sm = token.match(/^(\d+)\s*SM$/i);
+  if (sm) {
+    const miles = Number(sm[1]);
+    if (Number.isFinite(miles)) {
+      const meters = Math.round(miles * 1609.344);
+      // cap like ICAO "9999" meaning >=10km
+      return meters >= 9999 ? "9999" : String(meters);
+    }
+  }
 
   return null;
 }
@@ -31,27 +36,29 @@ function parseVisibility(token: string): string | null {
 function parseAltimeter(token: string): string | null {
   // ICAO QNH: Q1013
   const q = token.match(/^Q(\d{4})$/);
-  if (q) return q[1];
+  if (q) return q[1]; // hPa
 
-  // FAA altimeter: A3020 (inHg*100) → hPa換算して返す（四捨五入）
+  // FAA altimeter: A3020 (inHg*100)
   const a = token.match(/^A(\d{4})$/);
   if (a) {
     const inHg = Number(a[1]) / 100;
+    if (!Number.isFinite(inHg)) return null;
     const hPa = Math.round(inHg * 33.8639);
     return String(hPa);
   }
+
   return null;
 }
 
 export async function GET(req: Request) {
   const { searchParams } = new URL(req.url);
-  const icao = searchParams.get("icao")?.trim();
+  const icaoRaw = (searchParams.get("icao") ?? "").trim();
 
-  if (!icao) {
+  if (!icaoRaw) {
     return NextResponse.json({ error: "ICAO code is required" }, { status: 400 });
   }
 
-  const upper = icao.toUpperCase();
+  const upper = icaoRaw.toUpperCase();
 
   const metarURL = `https://aviationweather.gov/api/data/metar?ids=${upper}&format=json`;
   const tafURL = `https://aviationweather.gov/api/data/taf?ids=${upper}&format=json`;
@@ -65,7 +72,6 @@ export async function GET(req: Request) {
   const tafs = (await tafRes.json()) as AwTaf[];
 
   const metar = metars?.[0];
-  const taf = tafs?.[0];
 
   if (!metar?.rawOb) {
     return NextResponse.json({ error: "METAR not available" }, { status: 404 });
@@ -88,7 +94,6 @@ export async function GET(req: Request) {
     }
   }
 
-  // ✅ ceiling判定は wxJudge だけに一本化（ここで勝手に "Ceiling present" を足さない）
   const wx = judgeWx({ clouds: metar.clouds ?? [] });
 
   return NextResponse.json({
@@ -102,7 +107,7 @@ export async function GET(req: Request) {
       clouds: metar.clouds ?? [],
       raw_text: rawMetar
     },
-    taf: taf?.rawTAF ?? null,
+    taf: tafs?.[0]?.rawTAF ?? null,
     wx_analysis: wx,
     time: new Date().toISOString()
   });
