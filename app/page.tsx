@@ -4,7 +4,11 @@ import { useState } from "react";
 import TafTimeline from "./components/TafTimeline";
 
 type WxResponse = {
-  metar: {
+  status?: string;
+  icao?: string;
+  error?: string;
+
+  metar?: {
     station_id: string;
     wind: string;
     visibility: string | null;
@@ -12,13 +16,16 @@ type WxResponse = {
     clouds: string[];
     raw_text: string;
   };
-  taf: string | null;
-  wx_analysis: {
+
+  taf?: string | null;
+
+  wx_analysis?: {
     level: "GREEN" | "AMBER" | "RED";
     reasons: string[];
     ceilingFt: number | null;
   };
-  time: string;
+
+  time?: string;
 };
 
 export default function Page() {
@@ -35,40 +42,51 @@ export default function Page() {
 
     try {
       const res = await fetch(`/api/weather?icao=${encodeURIComponent(code)}`, {
-        cache: "no-store"
+        cache: "no-store",
       });
-
-      const json = await res.json();
+      const json = (await res.json()) as WxResponse;
       setData(json);
     } catch {
-      alert("Weather API error");
+      setData({ error: "Weather API error" });
     } finally {
       setLoading(false);
     }
   }
 
   const reasons = data?.wx_analysis?.reasons ?? [];
+  const level = data?.wx_analysis?.level ?? "GREEN";
+
+  const hasMetar = !!data?.metar?.station_id;
 
   return (
     <main style={{ padding: 30, fontFamily: "sans-serif" }}>
       {/* ICAO INPUT */}
       <div style={{ display: "flex", gap: 10, alignItems: "center", marginBottom: 20 }}>
         <div style={{ width: 60, fontWeight: 800 }}>ICAO</div>
+
         <input
           placeholder="RJTT / KJFK / ROAH"
           value={icao}
           onChange={(e) => setIcao(e.target.value.toUpperCase())}
           style={{ padding: 10, width: 260 }}
         />
+
         <button onClick={getWeather} style={{ padding: "10px 14px", fontWeight: 700 }}>
           Get Weather
         </button>
       </div>
 
       {loading && <div>Loading…</div>}
+
+      {!loading && data?.error && (
+        <div style={{ color: "crimson" }}>
+          {data.error}
+        </div>
+      )}
+
       {!loading && !data && <div>—</div>}
 
-      {data?.metar?.station_id && (
+      {hasMetar && data?.metar && (
         <>
           {/* KEY SUMMARY */}
           <h2>Key Summary</h2>
@@ -105,9 +123,7 @@ export default function Page() {
           </div>
 
           {/* REASONS */}
-          <h3 style={{ marginTop: 30 }}>
-            判定理由（{data.wx_analysis?.level ?? "—"}）
-          </h3>
+          <h3 style={{ marginTop: 30 }}>判定理由（{level}）</h3>
 
           {reasons.length === 0 ? (
             <div>—</div>
