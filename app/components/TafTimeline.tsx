@@ -51,23 +51,22 @@ export default function TafTimeline({ rawTaf }: Props) {
     }
   }
 
-  return (
-  <div style={{ display: "flex", gap: 12, flexWrap: "wrap" }}>
-  {timeline.map((s, i) => (
-    <div
-      key={i}
-      style={{
-        border: "1px solid #ccc",
-        padding: "10px 12px",
-        borderRadius: 8,
-        minWidth: 90,
-        background: "#fafafa",
-      }}
-    >
-      <div style={{ fontWeight: 800 }}>{s.label}</div>
-      {s.period && (
-        <div style={{ fontSize: 12, marginTop: 4 }}>{s.period}</div>
-      )}
+   return (
+    <div style={{ display: "flex", gap: 12, flexWrap: "wrap" }}>
+      {timeline.map((s, i) => (
+        <div
+          key={i}
+          style={{
+            border: "1px solid #ccc",
+            padding: "10px 12px",
+            borderRadius: 8,
+            minWidth: 90,
+            background: "#fafafa",
+          }}
+        >
+          <strong>{s.label}</strong>
+          {s.period && <div>{s.period}</div>}
+        </div>
+      ))}
     </div>
-  ))}
-</div>
+  );
