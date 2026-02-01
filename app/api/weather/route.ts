@@ -1,81 +1,73 @@
-export async function GET(request: Request) {
-  const { searchParams } = new URL(request.url);
+// app/api/weather/route.ts
+
+import { NextResponse } from "next/server";
+import { judgeWx } from "@/app/lib/wx/wxJudge";
+
+function parseVisibility(token: string): string | null {
+  // 9999
+  if (/^\d{4}$/.test(token)) return token;
+
+  // 10SM / 5SM etc
+  const sm = token.match(/^(\d+)?SM$/);
+  if (sm) {
+    const miles = Number(sm[1] ?? 10);
+    const meters = Math.round(miles * 1609);
+    return meters >= 9999 ? "9999" : String(meters);
+  }
+
+  return null;
+}
+
+function parseQnh(token: string): string | null {
+  // Q1013
+  const q = token.match(/^Q(\d{4})$/);
+  if (q) return q[1];
+
+  // A3020
+  const a = token.match(/^A(\d{4})$/);
+  if (a) {
+    const inHg = Number(a[1]) / 100;
+    const hpa = Math.round(inHg * 33.8639);
+    return String(hpa);
+  }
+
+  return null;
+}
+
+export async function GET(req: Request) {
+  const { searchParams } = new URL(req.url);
   const icao = searchParams.get("icao");
 
-  if (!icao) {
-    return Response.json(
-      { error: "ICAO code is required" },
-      { status: 400 }
-    );
+  const res = await fetch(
+    `https://aviationweather.gov/api/data/metar?ids=${icao}&format=json`
+  );
+  const metars = await res.json();
+  const metar = metars[0];
+
+  const tokens = metar.rawOb.split(" ");
+
+  let visibility: string | null = null;
+  let qnh: string | null = null;
+
+  for (const t of tokens) {
+    if (!visibility) visibility = parseVisibility(t);
+    if (!qnh) qnh = parseQnh(t);
   }
 
-  const upper = icao.toUpperCase();
+  const wx = judgeWx({
+    clouds: metar.clouds,
+  });
 
-  const metarURL =
-    `https://aviationweather.gov/api/data/metar?ids=${upper}&format=json`;
-
-  const tafURL =
-    `https://aviationweather.gov/api/data/taf?ids=${upper}&format=json`;
-
-  const [metarRes, tafRes] = await Promise.all([
-    fetch(metarURL, { cache: "no-store" }),
-    fetch(tafURL, { cache: "no-store" })
-  ]);
-
-  const metar = await metarRes.json();
-  const taf = await tafRes.json();
-
-  const rawMetar = metar?.[0]?.rawOb || null;
-  const rawTaf = taf?.[0]?.rawTAF || null;
-
-  // ===== 基本解析 =====
-  const wind =
-    rawMetar?.match(/(\d{3}|VRB)(\d{2})(G\d{2})?KT/)?.[0] ?? null;
-
-  const visibility =
-    rawMetar?.match(/\s(\d{4}|9999)\s/)?.[1] ?? null;
-
-  const qnh =
-    rawMetar?.match(/Q(\d{4})/)?.[1] ?? null;
-
-  const clouds =
-    rawMetar?.match(/(FEW|SCT|BKN|OVC)\d{3}/g) ?? [];
-
-  // ===== リスク評価 =====
-  let level = "GREEN";
-  const reasons: string[] = [];
-
-  if (visibility && Number(visibility) < 3000) {
-    level = "RED";
-    reasons.push("Low visibility");
-  }
-
-  if (clouds.some(c => c.startsWith("BKN") || c.startsWith("OVC"))) {
-    level = level === "RED" ? "RED" : "AMBER";
-    reasons.push("Ceiling present");
-  }
-
-  if (wind && wind.includes("G")) {
-    level = level === "GREEN" ? "AMBER" : level;
-    reasons.push("Gusty wind");
-  }
-
-  return Response.json({
-    status: "OK",
-    icao: upper,
-    sources: ["metar", "taf", "aviationweather.gov"],
+  return NextResponse.json({
     metar: {
-      raw: rawMetar,
-      wind,
+      station_id: metar.icaoId,
+      wind: metar.wdir + metar.wspd + "KT",
       visibility,
-      qnh,
-      clouds
+      altimeter: qnh,
+      clouds: metar.clouds,
+      raw_text: metar.rawOb,
     },
-    taf: rawTaf,
-    wx_analysis: {
-      level,
-      reasons
-    },
-    time: new Date().toISOString()
+    wx_analysis: wx,
+    taf: metar.taf,
   });
 }
