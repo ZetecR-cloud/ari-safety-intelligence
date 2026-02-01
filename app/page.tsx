@@ -24,6 +24,8 @@ type WxResponse = {
     reasons: string[];
     ceilingFt: number | null;
   };
+};
+
 
   time?: string;
 };
