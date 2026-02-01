@@ -1,10 +1,10 @@
-// app/lib/wx/wxJudge.ts
-
-export function judgeWx(metar: any) {
+export function judgeWx(input: { clouds: string[] }) {
   const reasons: string[] = [];
+  const clouds = input?.clouds ?? [];
 
-  const clouds: string[] = metar?.clouds ?? [];
-
+  // ICAO ceiling definition:
+  // ceiling = lowest layer of BKN/OVC/VV
+  // AMBER if ceiling < 3000 ft
   let ceilingFt: number | null = null;
 
   for (const layer of clouds) {
@@ -12,19 +12,18 @@ export function judgeWx(metar: any) {
     if (!m) continue;
 
     const ft = parseInt(m[2], 10) * 100;
-    if (ceilingFt === null || ft < ceilingFt) {
-      ceilingFt = ft;
+    if (Number.isFinite(ft)) {
+      if (ceilingFt === null || ft < ceilingFt) ceilingFt = ft;
     }
   }
 
-  // ✅ ICAO OFFICIAL CEILING RULE
   if (ceilingFt !== null && ceilingFt < 3000) {
     reasons.push(`Ceiling present (<3000ft): ${ceilingFt}ft`);
   }
 
   return {
+    level: reasons.length ? "AMBER" : "GREEN",
     reasons,
-    ceilingFt,
+    ceilingFt
   };
 }
-
