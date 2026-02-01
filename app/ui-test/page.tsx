@@ -26,6 +26,17 @@ type WxResponse = {
   [k: string]: any;
 };
 
+type TafSegment = {
+  kind: "BASE" | "FM" | "BECMG" | "TEMPO" | "PROB";
+  startMin: number; // minutes since validity start
+  endMin: number; // minutes since validity start
+  label: string; // e.g. "BASE", "FM 0900Z"
+  text: string; // condition string
+  visM?: number | null;
+  ceilingFt?: number | null;
+  category: "VFR" | "MVFR" | "IFR" | "LIFR" | "UNK";
+};
+
 function safeUpper(s: string) {
   return (s ?? "").trim().toUpperCase();
 }
@@ -46,6 +57,243 @@ function levelCopy(level: WxLevel) {
       return { label: "RED", desc: "要判断（PIC/Dispatch Review）" };
     default:
       return { label: "UNKNOWN", desc: "判定情報が不足しています" };
+  }
+}
+
+/** ---------- TAF timeline parsing (robust, minimal assumptions) ---------- */
+
+function parseTafValidity(taf: string): { startDay: number; startHour: number; endDay: number; endHour: number } | null {
+  // Example: "TAF RJNK 010505Z 0106/0212 ..."
+  const m = taf.match(/\b(\d{2})(\d{2})\/(\d{2})(\d{2})\b/);
+  if (!m) return null;
+  const startDay = Number(m[1]);
+  const startHour = Number(m[2]);
+  const endDay = Number(m[3]);
+  const endHour = Number(m[4]);
+  if ([startDay, startHour, endDay, endHour].some((n) => Number.isNaN(n))) return null;
+  return { startDay, startHour, endDay, endHour };
+}
+
+function dayHourToMinFromStart(day: number, hour: number, startDay: number, startHour: number): number {
+  // validity can cross midnight (day increases)
+  const dayOffset = day - startDay;
+  const totalHours = dayOffset * 24 + (hour - startHour);
+  return totalHours * 60;
+}
+
+function parseFmTime(token: string): { day: number; hour: number; min: number } | null {
+  // FMDDHHMM e.g. FM010900 or FM021230
+  const m = token.match(/^FM(\d{2})(\d{2})(\d{2})$/);
+  if (!m) return null;
+  return { day: Number(m[1]), hour: Number(m[2]), min: Number(m[3]) };
+}
+
+function parseWindow(tokenA: string, tokenB: string): { sDay: number; sHour: number; eDay: number; eHour: number } | null {
+  // token like 0110/0118 or 0203/0206 etc.
+  const m = (tokenA + " " + tokenB).match(/\b(\d{2})(\d{2})\/(\d{2})(\d{2})\b/);
+  if (!m) return null;
+  return { sDay: Number(m[1]), sHour: Number(m[2]), eDay: Number(m[3]), eHour: Number(m[4]) };
+}
+
+function parseVisibilityMeters(text: string): number | null {
+  // Common formats: 9999, 8000, 3000, 1500, also "P6SM" "3SM" etc.
+  // We'll support meters (4 digits) primarily. SM parsing kept simple.
+  const mMeters = text.match(/\b(\d{4})\b/);
+  if (mMeters) {
+    const v = Number(mMeters[1]);
+    if (!Number.isNaN(v) && v >= 0 && v <= 9999) return v;
+  }
+  const mP6 = text.match(/\bP6SM\b/);
+  if (mP6) return 9999; // treat as very good
+  const mSm = text.match(/\b(\d+)\s*SM\b/);
+  if (mSm) {
+    const sm = Number(mSm[1]);
+    if (!Number.isNaN(sm)) return Math.round(sm * 1609.34); // rough meters
+  }
+  return null;
+}
+
+function parseCeilingFeet(text: string): number | null {
+  // Ceiling defined by lowest BKN/OVC/VV layer. Format: BKN020 => 2000ft
+  const layers = Array.from(text.matchAll(/\b(BKN|OVC|VV)(\d{3})\b/g));
+  if (!layers.length) return null;
+  let minFt = Infinity;
+  for (const l of layers) {
+    const hundreds = Number(l[2]);
+    if (!Number.isNaN(hundreds)) {
+      const ft = hundreds * 100;
+      if (ft < minFt) minFt = ft;
+    }
+  }
+  return minFt === Infinity ? null : minFt;
+}
+
+function flightCategory(visM: number | null, ceilingFt: number | null): "VFR" | "MVFR" | "IFR" | "LIFR" | "UNK" {
+  // Practical categories (rough, ICAO/FAA-ish):
+  // VFR: vis >= 5000m and ceiling >= 3000ft
+  // MVFR: vis 3000-4999 or ceiling 1000-2999
+  // IFR: vis 1600-2999 or ceiling 500-999
+  // LIFR: vis < 1600 or ceiling < 500
+  if (visM == null && ceilingFt == null) return "UNK";
+
+  const v = visM ?? 9999;
+  const c = ceilingFt ?? 99999;
+
+  if (v < 1600 || c < 500) return "LIFR";
+  if (v < 3000 || c < 1000) return "IFR";
+  if (v < 5000 || c < 3000) return "MVFR";
+  return "VFR";
+}
+
+function clamp(n: number, lo: number, hi: number) {
+  return Math.max(lo, Math.min(hi, n));
+}
+
+function buildTafTimeline(tafRaw: string): { segments: TafSegment[]; totalMin: number; validityLabel: string } {
+  const taf = (tafRaw ?? "").trim().replace(/\s+/g, " ");
+  const validity = parseTafValidity(taf);
+  if (!taf || !validity) {
+    return { segments: [], totalMin: 0, validityLabel: "Validity: —" };
+  }
+
+  const { startDay, startHour, endDay, endHour } = validity;
+  const startMin = 0;
+  const totalMin = dayHourToMinFromStart(endDay, endHour, startDay, startHour);
+
+  // Split into tokens
+  const tokens = taf.split(" ");
+
+  // Find where actual forecast begins (after validity token)
+  const validityIdx = tokens.findIndex((t) => /^\d{4}\/\d{4}$/.test(t));
+  const afterValidity = validityIdx >= 0 ? tokens.slice(validityIdx + 1) : tokens;
+
+  // We'll create blocks by detecting markers: FMxxxxxx, BECMG ddhh/ddhh, TEMPO ddhh/ddhh, PROBnn ddhh/ddhh (optional)
+  type Marker = { kind: TafSegment["kind"]; startMin: number; endMin: number; label: string; textStartIdx: number };
+
+  const markers: Marker[] = [];
+  markers.push({ kind: "BASE", startMin: 0, endMin: totalMin, label: "BASE", textStartIdx: 0 });
+
+  for (let i = 0; i < afterValidity.length; i++) {
+    const t = afterValidity[i];
+
+    // FM
+    const fm = parseFmTime(t);
+    if (fm) {
+      const s = dayHourToMinFromStart(fm.day, fm.hour, startDay, startHour) + fm.min;
+      markers.push({
+        kind: "FM",
+        startMin: s,
+        endMin: totalMin,
+        label: `FM ${String(fm.day).padStart(2, "0")}${String(fm.hour).padStart(2, "0")}${String(fm.min).padStart(2, "0")}Z`,
+        textStartIdx: i + 1,
+      });
+      continue;
+    }
+
+    // BECMG / TEMPO / PROBxx
+    if (t === "BECMG" || t === "TEMPO" || t.startsWith("PROB")) {
+      const kind: TafSegment["kind"] =
+        t === "BECMG" ? "BECMG" : t === "TEMPO" ? "TEMPO" : "PROB";
+
+      // Next token should be window ddhh/ddhh
+      const winToken = afterValidity[i + 1] ?? "";
+      const win = winToken.match(/^(\d{4})\/(\d{4})$/) ? winToken : "";
+      if (win) {
+        const m = win.match(/^(\d{2})(\d{2})\/(\d{2})(\d{2})$/);
+        if (m) {
+          const sDay = Number(m[1]);
+          const sHour = Number(m[2]);
+          const eDay = Number(m[3]);
+          const eHour = Number(m[4]);
+          const s = dayHourToMinFromStart(sDay, sHour, startDay, startHour);
+          const e = dayHourToMinFromStart(eDay, eHour, startDay, startHour);
+          markers.push({
+            kind,
+            startMin: s,
+            endMin: e,
+            label: `${t} ${winToken}`,
+            textStartIdx: i + 2,
+          });
+        }
+      }
+    }
+  }
+
+  // Sort markers by time; BASE should stay at 0
+  markers.sort((a, b) => a.startMin - b.startMin);
+
+  // Determine text ranges for each marker until next marker keyword at same level
+  const keywordRe = /^(FM\d{6}|BECMG|TEMPO|PROB\d{2})$/;
+
+  const segments: TafSegment[] = [];
+
+  for (let mi = 0; mi < markers.length; mi++) {
+    const m = markers[mi];
+
+    // Determine end for BASE/FM by next BASE/FM marker start; for BECMG/TEMPO/PROB use their window end already
+    let s = clamp(m.startMin, 0, totalMin);
+    let e = clamp(m.endMin, 0, totalMin);
+
+    if (m.kind === "BASE") {
+      // end at first marker after BASE (excluding itself)
+      const next = markers.find((x) => x !== m && x.startMin > s);
+      e = next ? clamp(next.startMin, 0, totalMin) : totalMin;
+    } else if (m.kind === "FM") {
+      // end at next FM marker start, else validity end
+      const nextFm = markers.find((x) => x.kind === "FM" && x.startMin > s);
+      e = nextFm ? clamp(nextFm.startMin, 0, totalMin) : totalMin;
+    } // BECMG/TEMPO/PROB keep their window end
+
+    if (e <= s) continue;
+
+    // Extract text from afterValidity starting at textStartIdx until next keyword (FM/BECMG/TEMPO/PROB) encountered
+    let j = m.textStartIdx;
+    const parts: string[] = [];
+    while (j < afterValidity.length) {
+      const tk = afterValidity[j];
+      if (keywordRe.test(tk)) break;
+      // Stop if we hit a time-window token that belongs to next marker (rare)
+      if (/^\d{4}\/\d{4}$/.test(tk) && (afterValidity[j - 1] === "BECMG" || afterValidity[j - 1] === "TEMPO" || afterValidity[j - 1]?.startsWith("PROB"))) {
+        break;
+      }
+      parts.push(tk);
+      j++;
+    }
+
+    const text = parts.join(" ").trim() || "—";
+    const visM = parseVisibilityMeters(text);
+    const ceilFt = parseCeilingFeet(text);
+    const cat = flightCategory(visM, ceilFt);
+
+    segments.push({
+      kind: m.kind,
+      startMin: s,
+      endMin: e,
+      label: m.label,
+      text,
+      visM,
+      ceilingFt: ceilFt,
+      category: cat,
+    });
+  }
+
+  const validityLabel = `Validity: ${String(startDay).padStart(2, "0")}${String(startHour).padStart(2, "0")}Z / ${String(endDay).padStart(2, "0")}${String(endHour).padStart(2, "0")}Z`;
+
+  return { segments, totalMin, validityLabel };
+}
+
+function catClass(cat: TafSegment["category"]) {
+  switch (cat) {
+    case "VFR":
+      return "cat vfr";
+    case "MVFR":
+      return "cat mvfr";
+    case "IFR":
+      return "cat ifr";
+    case "LIFR":
+      return "cat lifr";
+    default:
+      return "cat unk";
   }
 }
 
@@ -72,6 +320,8 @@ export default function UiTest() {
   const clouds = data?.metar?.clouds?.length ? data.metar.clouds.join(", ") : "—";
   const updated = data?.time ?? "—";
   const reasons = data?.wx_analysis?.reasons ?? [];
+
+  const timeline = useMemo(() => buildTafTimeline(typeof tafRaw === "string" ? tafRaw : ""), [tafRaw]);
 
   async function go() {
     const q = safeUpper(icao);
@@ -332,6 +582,112 @@ export default function UiTest() {
           font-size: 12px;
           color: #666;
         }
+
+        /* --- Timeline --- */
+        .timelineWrap {
+          margin-top: 12px;
+          background: #f8fafc;
+          border: 1px solid #e6e6e6;
+          border-radius: 12px;
+          padding: 10px;
+        }
+        .timelineHead {
+          display: flex;
+          align-items: center;
+          justify-content: space-between;
+          gap: 10px;
+          flex-wrap: wrap;
+          margin-bottom: 8px;
+        }
+        .tlLegend {
+          display: flex;
+          gap: 8px;
+          flex-wrap: wrap;
+          align-items: center;
+        }
+        .pill {
+          font-size: 11px;
+          font-weight: 900;
+          border-radius: 999px;
+          padding: 4px 10px;
+          border: 1px solid #e6e6e6;
+          background: #fff;
+          color: #111;
+        }
+        .bar {
+          position: relative;
+          height: 54px;
+          background: #fff;
+          border: 1px solid #e6e6e6;
+          border-radius: 12px;
+          overflow: hidden;
+        }
+        .seg {
+          position: absolute;
+          top: 6px;
+          bottom: 6px;
+          border-radius: 10px;
+          border: 1px solid rgba(0, 0, 0, 0.08);
+          padding: 6px 8px;
+          overflow: hidden;
+          display: flex;
+          flex-direction: column;
+          justify-content: center;
+          gap: 2px;
+        }
+        .seg .t1 {
+          font-size: 11px;
+          font-weight: 900;
+          color: rgba(0, 0, 0, 0.85);
+          white-space: nowrap;
+          text-overflow: ellipsis;
+          overflow: hidden;
+        }
+        .seg .t2 {
+          font-size: 10px;
+          color: rgba(0, 0, 0, 0.65);
+          white-space: nowrap;
+          text-overflow: ellipsis;
+          overflow: hidden;
+        }
+
+        .cat.vfr { background: #d1fae5; }
+        .cat.mvfr { background: #fef3c7; }
+        .cat.ifr { background: #fee2e2; }
+        .cat.lifr { background: #e9d5ff; }
+        .cat.unk { background: #e5e7eb; }
+
+        .tlTable {
+          margin-top: 10px;
+          display: grid;
+          gap: 8px;
+        }
+        .rowSeg {
+          background: #fff;
+          border: 1px solid #e6e6e6;
+          border-radius: 12px;
+          padding: 10px;
+        }
+        .rowTop {
+          display: flex;
+          justify-content: space-between;
+          gap: 10px;
+          flex-wrap: wrap;
+          align-items: baseline;
+        }
+        .rowTitle {
+          font-weight: 900;
+          font-size: 12px;
+        }
+        .rowMeta {
+          font-size: 11px;
+          color: #666;
+        }
+        .rowText {
+          margin-top: 6px;
+          font-size: 12px;
+          color: #111;
+        }
       `}</style>
 
       <div className="wrap">
@@ -441,6 +797,73 @@ export default function UiTest() {
               </div>
             </div>
 
+            {/* --- TAF Timeline --- */}
+            <div className="timelineWrap">
+              <div className="timelineHead">
+                <div>
+                  <div className="small" style={{ fontWeight: 900 }}>
+                    TAF Timeline（時系列）
+                  </div>
+                  <div className="small">{timeline.validityLabel}</div>
+                </div>
+
+                <div className="tlLegend">
+                  <span className="pill">VFR</span>
+                  <span className="pill">MVFR</span>
+                  <span className="pill">IFR</span>
+                  <span className="pill">LIFR</span>
+                  <span className="pill">UNK</span>
+                </div>
+              </div>
+
+              {timeline.segments.length === 0 || timeline.totalMin <= 0 ? (
+                <div className="small">TAFの時系列解析ができません（TAF形式またはValidityが取得できない可能性）。</div>
+              ) : (
+                <>
+                  <div className="bar" aria-label="TAF timeline bar">
+                    {timeline.segments.map((s, idx) => {
+                      const leftPct = (s.startMin / timeline.totalMin) * 100;
+                      const widthPct = ((s.endMin - s.startMin) / timeline.totalMin) * 100;
+
+                      return (
+                        <div
+                          key={idx}
+                          className={`seg ${catClass(s.category)}`}
+                          style={{
+                            left: `${leftPct}%`,
+                            width: `${Math.max(widthPct, 2)}%`,
+                          }}
+                          title={`${s.label} / ${s.category}\n${s.text}`}
+                        >
+                          <div className="t1">{s.label} — {s.category}</div>
+                          <div className="t2">
+                            {s.ceilingFt != null ? `Ceil ${s.ceilingFt}ft` : "Ceil —"} /{" "}
+                            {s.visM != null ? `Vis ${s.visM}m` : "Vis —"}
+                          </div>
+                        </div>
+                      );
+                    })}
+                  </div>
+
+                  <div className="tlTable">
+                    {timeline.segments.map((s, idx) => (
+                      <div key={idx} className="rowSeg">
+                        <div className="rowTop">
+                          <div className="rowTitle">
+                            {s.label} / {s.category}
+                          </div>
+                          <div className="rowMeta">
+                            {Math.round(s.startMin / 60)}h → {Math.round(s.endMin / 60)}h（Validity startからの経過）
+                          </div>
+                        </div>
+                        <div className="rowText">{s.text}</div>
+                      </div>
+                    ))}
+                  </div>
+                </>
+              )}
+            </div>
+
             <div style={{ marginTop: 12 }}>
               <div className="small" style={{ fontWeight: 900 }}>
                 判定理由（reasons） / {lv.label}
@@ -468,7 +891,7 @@ export default function UiTest() {
         </div>
 
         <div className="footer">
-          ※ 次フェーズで「TAF時系列」「Crosswind」「TS/CB即RED」「Alternate minima」を追加します。
+          ※ 次フェーズで「Crosswind」「TS/CB即RED」「Alternate minima」を追加します。
         </div>
       </div>
     </div>
