@@ -4,15 +4,13 @@ import { useState } from "react";
 import TafTimeline from "./components/TafTimeline";
 
 type WxResponse = {
-  status: "OK";
-  icao: string;
   metar: {
     station_id: string;
-    wind: string | null;
-    visibility: string | null;
-    altimeter: string | null; // QNH(hPa) as string e.g. "1020"
+    wind: string;
+    visibility: string | null; // meters string (e.g. "9999")
+    altimeter: string | null;  // hPa string (e.g. "1013")
     clouds: string[];
-    raw_text: string | null;
+    raw_text: string;
   };
   taf: string | null;
   wx_analysis: {
@@ -27,31 +25,23 @@ export default function Page() {
   const [icao, setIcao] = useState("");
   const [data, setData] = useState<WxResponse | null>(null);
   const [loading, setLoading] = useState(false);
-  const [errMsg, setErrMsg] = useState<string | null>(null);
 
   async function getWeather() {
     const code = icao.trim().toUpperCase();
     if (!code) return;
 
     setLoading(true);
-    setErrMsg(null);
     setData(null);
 
     try {
       const res = await fetch(`/api/weather?icao=${encodeURIComponent(code)}`, {
-        cache: "no-store",
+        cache: "no-store"
       });
 
       const json = await res.json();
-
-      if (!res.ok) {
-        setErrMsg(json?.error ?? "Weather API error");
-        return;
-      }
-
-      setData(json as WxResponse);
+      setData(json);
     } catch {
-      setErrMsg("Weather API error");
+      alert("Weather API error");
     } finally {
       setLoading(false);
     }
@@ -64,40 +54,21 @@ export default function Page() {
       {/* ICAO INPUT */}
       <div style={{ display: "flex", gap: 10, alignItems: "center", marginBottom: 20 }}>
         <div style={{ width: 60, fontWeight: 800 }}>ICAO</div>
-
         <input
-          placeholder="RJTT / KJFK / RODN"
+          placeholder="RJTT / KJFK / ROAH"
           value={icao}
           onChange={(e) => setIcao(e.target.value)}
           style={{ padding: 10, width: 260 }}
         />
-
-        <button
-          onClick={getWeather}
-          style={{ padding: "10px 14px", fontWeight: 700, cursor: "pointer" }}
-          disabled={loading}
-        >
+        <button onClick={getWeather} style={{ padding: "10px 14px", fontWeight: 700 }}>
           Get Weather
-        </button>
-
-        <button
-          onClick={() => {
-            setData(null);
-            setErrMsg(null);
-            setIcao("");
-          }}
-          style={{ padding: "10px 14px", cursor: "pointer" }}
-          disabled={loading}
-        >
-          Clear
         </button>
       </div>
 
       {loading && <div>Loading…</div>}
-      {errMsg && <div style={{ color: "crimson", fontWeight: 700 }}>{errMsg}</div>}
-      {!loading && !data && !errMsg && <div>—</div>}
+      {!loading && !data && <div>—</div>}
 
-      {data && data.metar?.station_id && (
+      {data?.metar?.station_id && (
         <>
           {/* KEY SUMMARY */}
           <h2>Key Summary</h2>
@@ -107,7 +78,7 @@ export default function Page() {
               <strong>Station:</strong> {data.metar.station_id}
             </div>
             <div>
-              <strong>Wind:</strong> {data.metar.wind ?? "—"}
+              <strong>Wind:</strong> {data.metar.wind}
             </div>
             <div>
               <strong>Visibility:</strong> {data.metar.visibility ?? "—"}
@@ -125,7 +96,7 @@ export default function Page() {
 
           <div style={{ display: "flex", gap: 20 }}>
             <pre style={{ background: "#f6f6f6", padding: 12, width: "50%", whiteSpace: "pre-wrap" }}>
-              {data.metar.raw_text ?? "NO METAR"}
+              {data.metar.raw_text}
             </pre>
 
             <pre style={{ background: "#f6f6f6", padding: 12, width: "50%", whiteSpace: "pre-wrap" }}>
@@ -143,14 +114,13 @@ export default function Page() {
           ) : (
             <ul>
               {reasons.map((r, i) => (
-                <li key={`${i}-${r}`}>{r}</li>
+                <li key={i}>{r}</li>
               ))}
             </ul>
           )}
 
           {/* TAF TIMELINE */}
           <h2 style={{ marginTop: 40 }}>TAF Timeline</h2>
-
           <TafTimeline rawTaf={data.taf ?? ""} />
         </>
       )}
