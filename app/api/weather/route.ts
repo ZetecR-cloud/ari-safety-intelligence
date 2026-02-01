@@ -3,14 +3,14 @@ import { judgeWx } from "@/app/lib/wx/wxJudge";
 
 /* =====================================================
    Visibility parser
-   - 9999
-   - 10SM / 5SM (US METAR)
+   - ICAO : 9999
+   - FAA  : 10SM / 5SM
 ===================================================== */
 function parseVisibility(token: string): string | null {
   // ICAO style
   if (/^\d{4}$/.test(token)) return token;
 
-  // US style: 10SM
+  // FAA style
   const sm = token.match(/^(\d+)?SM$/);
   if (sm) {
     const miles = Number(sm[1] ?? 10);
@@ -59,7 +59,7 @@ export async function GET(req: Request) {
   const upper = icao.toUpperCase();
 
   /* -----------------------------
-     fetch METAR / TAF
+     Fetch METAR / TAF
   ----------------------------- */
   const metarURL = `https://aviationweather.gov/api/data/metar?ids=${upper}&format=json`;
   const tafURL = `https://aviationweather.gov/api/data/taf?ids=${upper}&format=json`;
@@ -75,18 +75,21 @@ export async function GET(req: Request) {
   const metar = metarJson?.[0];
   const taf = tafJson?.[0];
 
-  if (!metar) {
+  if (!metar?.rawOb) {
     return NextResponse.json(
       { error: "METAR not available" },
       { status: 404 }
     );
   }
 
+  /* -----------------------------
+     RAW METAR
+  ----------------------------- */
   const rawMetar: string = metar.rawOb;
   const tokens = rawMetar.split(" ");
 
   /* -----------------------------
-     visibility / qnh
+     Visibility / QNH
   ----------------------------- */
   let visibility: string | null = null;
   let qnh: string | null = null;
@@ -97,15 +100,15 @@ export async function GET(req: Request) {
   }
 
   /* -----------------------------
-     ICAO weather judgement
+     Weather judgement
      (唯一の ceiling 判定元)
   ----------------------------- */
   const wx = judgeWx({
-    clouds: metar.clouds,
+    clouds: metar.clouds ?? [],
   });
 
   /* -----------------------------
-     response
+     Response
   ----------------------------- */
   return NextResponse.json({
     status: "OK",
@@ -116,7 +119,7 @@ export async function GET(req: Request) {
       wind: metar.wdir + metar.wspd + "KT",
       visibility,
       altimeter: qnh,
-      clouds: metar.clouds,
+      clouds: metar.clouds ?? [],
       raw_text: rawMetar,
     },
 
