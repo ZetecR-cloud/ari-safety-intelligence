@@ -15,14 +15,12 @@ type WxResp = {
   metar?: {
     raw?: string;
     wind?: string; // e.g. "09003KT" / "VRB03KT"
-    visibility?: string; // e.g. "9999" / "10SM"
-    qnh?: string; // e.g. "1013" or "Q1013"
+    visibility?: string; // e.g. "9999" / "10SM" / "P6SM"
+    qnh?: string; // e.g. "1013" or "Q1013" or "A2992"
     clouds?: string[]; // e.g. ["FEW008","BKN030"]
-    wx?: string; // e.g. "-SHSN"
+    wx?: string; // e.g. "-RA"
   };
-  taf?: {
-    raw?: string;
-  };
+  taf?: { raw?: string };
   wx_analysis?: {
     level?: WxLevel;
     reasons?: string[];
@@ -35,7 +33,6 @@ type WindParsed = {
   dirDeg: number | null; // null = VRB
   spdKt: number;
   gustKt?: number;
-  isVrb?: boolean;
 };
 
 type RwyEntry = { id: string; magDeg: number };
@@ -43,8 +40,8 @@ type RwyDbEntry = { name: string; runways: RwyEntry[] };
 
 type TafGroup = {
   kind: "BASE" | "TEMPO" | "BECMG" | "FM";
-  range: string; // e.g. "0108Z → 0113Z" (as text only)
-  raw: string; // group text
+  range: string; // "0108Z → 0113Z" (text)
+  raw: string;
   flightRule: "VFR" | "MVFR" | "IFR" | "LIFR" | "UNK";
 };
 
@@ -118,23 +115,18 @@ function safeRound(n: number) {
   return Math.round(n);
 }
 
-/* ===========================
-   METAR parsing helpers
-   - APIが欠けるケース(PHNL等)をRAWから補完
-=========================== */
-
-function tokenizeWx(raw?: string): string[] {
+function tokenize(raw?: string): string[] {
   if (!raw) return [];
   return raw.trim().split(/\s+/).filter(Boolean);
 }
 
-function isCloudToken(t: string) {
-  return /^(FEW|SCT|BKN|OVC|VV)\d{3}$/.test(t) || /^(CLR|SKC|NSC|NCD)$/.test(t);
-}
+/* ===========================
+   METAR parsing (RAW fallback)
+=========================== */
 
 function parseMetarWindFromRaw(raw?: string): WindParsed | null {
   if (!raw) return null;
-  const tokens = tokenizeWx(raw.toUpperCase());
+  const tokens = tokenize(raw.toUpperCase());
   // wind token example: 09003KT, VRB03KT, 22010G20KT
   const w = tokens.find((t) => /^(VRB|\d{3})\d{2,3}(G\d{2,3})?KT$/.test(t));
   if (!w) return null;
@@ -143,8 +135,8 @@ function parseMetarWindFromRaw(raw?: string): WindParsed | null {
   if (vrb) {
     const spd = Number(vrb[1]);
     const gust = vrb[3] ? Number(vrb[3]) : undefined;
-    return { dirDeg: null, spdKt: spd, gustKt: gust, isVrb: true };
-    }
+    return { dirDeg: null, spdKt: spd, gustKt: gust };
+  }
 
   const m = w.match(/^(\d{3})(\d{2,3})(G(\d{2,3}))?KT$/);
   if (!m) return null;
@@ -152,40 +144,42 @@ function parseMetarWindFromRaw(raw?: string): WindParsed | null {
   const dir = Number(m[1]);
   const spd = Number(m[2]);
   const gust = m[4] ? Number(m[4]) : undefined;
-  return { dirDeg: dir, spdKt: spd, gustKt: gust, isVrb: false };
+  return { dirDeg: dir, spdKt: spd, gustKt: gust };
 }
 
 function parseVisibilityFromRaw(raw?: string): string | null {
   if (!raw) return null;
-  const tokens = tokenizeWx(raw.toUpperCase());
+  const tokens = tokenize(raw.toUpperCase());
+
   // ICAO style: 9999 / 8000 / 1500 etc
   const v1 = tokens.find((t) => /^\d{4}$/.test(t));
   if (v1) return v1;
-  // US style: 10SM / 1SM / 3/4SM etc
-  const v2 = tokens.find((t) => /^(\d+|\d+\/\d+|\d+\s\d+\/\d+)SM$/.test(t.replace(/\s/g, "")) || /^\d+SM$/.test(t));
+
+  // US style: 10SM / 1SM / 3/4SM etc (簡略)
+  const v2 = tokens.find((t) => /^\d+SM$/.test(t) || /^P\d+SM$/.test(t) || /^\d+\/\d+SM$/.test(t));
   if (v2) return v2;
-  // P6SM
-  const v3 = tokens.find((t) => /^P\d+SM$/.test(t));
-  if (v3) return v3;
+
   return null;
 }
 
 function parseQnhFromRaw(raw?: string): string | null {
   if (!raw) return null;
-  const tokens = tokenizeWx(raw.toUpperCase());
-  // Q1013
+  const tokens = tokenize(raw.toUpperCase());
+
   const q = tokens.find((t) => /^Q\d{4}$/.test(t));
   if (q) return q.replace(/^Q/, "");
-  // A2994 (inHg)
+
   const a = tokens.find((t) => /^A\d{4}$/.test(t));
-  if (a) return a; // keep "A2994" for display if no Q
+  if (a) return a; // keep A2992 style for display if no Q
+
   return null;
 }
 
 function parseCloudsFromRaw(raw?: string): string[] {
   if (!raw) return [];
-  const tokens = tokenizeWx(raw.toUpperCase());
+  const tokens = tokenize(raw.toUpperCase());
   const clouds: string[] = [];
+
   for (const t of tokens) {
     if (/^(FEW|SCT|BKN|OVC|VV)\d{3}$/.test(t)) clouds.push(t);
     if (/^(CLR|SKC|NSC|NCD)$/.test(t)) clouds.push(t);
@@ -194,7 +188,6 @@ function parseCloudsFromRaw(raw?: string): string[] {
 }
 
 function isLikelyWxPhenomena(t: string) {
-  // Exclude obvious non-phenomena tokens
   if (!t) return false;
   if (t === "RMK" || t === "NOSIG" || t === "AUTO" || t === "COR") return false;
   if (t.endsWith("KT")) return false;
@@ -202,14 +195,15 @@ function isLikelyWxPhenomena(t: string) {
   if (/^\d{4}\/\d{4}$/.test(t)) return false;
   if (/^\d{4}$/.test(t)) return false;
   if (/^(Q\d{4}|A\d{4})$/.test(t)) return false;
-  if (isCloudToken(t)) return false;
+  if (/^(FEW|SCT|BKN|OVC|VV)\d{3}$/.test(t)) return false;
+  if (/^(CLR|SKC|NSC|NCD)$/.test(t)) return false;
 
-  // Phenomena patterns (rough but practical):
-  // -RA, SN, -SNRA, TSRA, SHRA, FZFG, BR, HZ etc
-  // Allow prefix +/-/VC and 2-8 letters.
+  // wx token rough pattern
   if (/^(-|\+|VC)?[A-Z]{2,8}$/.test(t)) {
-    // must include at least one known wx code chunk
-    const codes = ["DZ","RA","SN","SG","IC","PL","GR","GS","UP","BR","FG","FU","VA","DU","SA","HZ","PY","PO","SQ","FC","SS","DS","TS","SH","FZ","MI","PR","BC","DR","BL"];
+    const codes = [
+      "DZ","RA","SN","SG","IC","PL","GR","GS","UP","BR","FG","FU","VA","DU","SA","HZ",
+      "PO","SQ","FC","SS","DS","TS","SH","FZ","MI","PR","BC","DR","BL"
+    ];
     return codes.some((c) => t.includes(c));
   }
   return false;
@@ -217,10 +211,9 @@ function isLikelyWxPhenomena(t: string) {
 
 function parseWxPhenomenaFromRaw(raw?: string): string | null {
   if (!raw) return null;
-  const tokens = tokenizeWx(raw.toUpperCase());
+  const tokens = tokenize(raw.toUpperCase());
   const wx = tokens.filter(isLikelyWxPhenomena);
-  if (wx.length === 0) return null;
-  // keep order, join
+  if (!wx.length) return null;
   return wx.join(" ");
 }
 
@@ -236,9 +229,7 @@ function getCeilingFt(clouds?: string[]): number | null {
   for (const c of clouds) {
     if (c.startsWith("BKN") || c.startsWith("OVC") || c.startsWith("VV")) {
       const h = Number(c.slice(3)) * 100;
-      if (!isNaN(h)) {
-        ceiling = ceiling === null ? h : Math.min(ceiling, h);
-      }
+      if (!isNaN(h)) ceiling = ceiling === null ? h : Math.min(ceiling, h);
     }
   }
   return ceiling;
@@ -249,16 +240,7 @@ function getCeilingFt(clouds?: string[]): number | null {
 =========================== */
 
 function computeWindComponents(wind: WindParsed, rwyMag: number) {
-  // returns steady components (head/tail, cross)
-  // If VRB => cannot compute direction-based; we treat cross = spdKt as worst-case, head = 0.
-  if (wind.spdKt <= 0) {
-    return {
-      steady: { head: 0, cross: 0, crossSide: "CALM" as const },
-      gust: wind.gustKt ? { head: 0, cross: 0, crossSide: "CALM" as const } : null,
-      note: "CALM",
-    };
-  }
-
+  // If VRB => cannot compute direction-based. Use conservative: cross = spd, head=0.
   const calc = (spd: number) => {
     if (wind.dirDeg === null) {
       return { head: 0, cross: spd, crossSide: "VRB" as const };
@@ -282,73 +264,56 @@ function computeWindComponents(wind: WindParsed, rwyMag: number) {
   const steady = calc(wind.spdKt);
   const gust = wind.gustKt ? calc(wind.gustKt) : null;
 
-  return { steady, gust, note: wind.dirDeg === null ? "VRB" : "" };
+  return { steady, gust };
 }
 
 /* ===========================
-   TAF parsing (simple but robust enough)
+   TAF parsing (simple)
 =========================== */
 
 function parseTafGroups(tafRaw?: string): TafGroup[] {
   if (!tafRaw) return [];
-
-  const raw = tafRaw.replace(/\s+/g, " ").trim();
-  const up = raw.toUpperCase();
-
-  // remove leading "TAF" if present
+  const up = tafRaw.replace(/\s+/g, " ").trim().toUpperCase();
   const tokens = up.split(" ").filter(Boolean);
-  if (tokens.length < 3) return [];
+  if (tokens.length < 2) return [];
 
-  // Try to skip header: TAF ICAO ISSUE VALID...
   let idx = 0;
   if (tokens[idx] === "TAF") idx++;
-  const icao = tokens[idx] || "";
-  idx++;
-
-  // issue time: 0105Z etc (optional)
+  idx++; // ICAO
   if (tokens[idx] && /^\d{6}Z$/.test(tokens[idx])) idx++;
 
-  // validity: 0106/0212 (optional)
   const validityToken = tokens[idx] && /^\d{4}\/\d{4}$/.test(tokens[idx]) ? tokens[idx] : null;
   if (validityToken) idx++;
 
   const groups: { kind: TafGroup["kind"]; rangeToken?: string; startToken?: string; rawTokens: string[] }[] = [];
-
-  // BASE group initial
   groups.push({ kind: "BASE", rangeToken: validityToken ?? undefined, rawTokens: [] });
 
-  // parse remaining tokens, splitting at TEMPO/BECMG/FM
   while (idx < tokens.length) {
     const t = tokens[idx];
 
     if (t === "TEMPO" && tokens[idx + 1] && /^\d{4}\/\d{4}$/.test(tokens[idx + 1])) {
-      const rangeToken = tokens[idx + 1];
-      groups.push({ kind: "TEMPO", rangeToken, rawTokens: [] });
+      groups.push({ kind: "TEMPO", rangeToken: tokens[idx + 1], rawTokens: [] });
       idx += 2;
       continue;
     }
 
     if (t === "BECMG" && tokens[idx + 1] && /^\d{4}\/\d{4}$/.test(tokens[idx + 1])) {
-      const rangeToken = tokens[idx + 1];
-      groups.push({ kind: "BECMG", rangeToken, rawTokens: [] });
+      groups.push({ kind: "BECMG", rangeToken: tokens[idx + 1], rawTokens: [] });
       idx += 2;
       continue;
     }
 
-    const fm = t.match(/^FM(\d{6})$/); // FMddhhmm
+    const fm = t.match(/^FM(\d{6})$/);
     if (fm) {
       groups.push({ kind: "FM", startToken: fm[1], rawTokens: [] });
       idx += 1;
       continue;
     }
 
-    // otherwise append token to last group
     groups[groups.length - 1].rawTokens.push(t);
     idx += 1;
   }
 
-  // helper to compute range display
-  const toZ = (ddhh?: string) => (ddhh ? `${ddhh.slice(2, 4)}${ddhh.slice(4, 6)}Z` : "");
   const ddhhToZ = (ddhh: string) => `${ddhh.slice(2, 4)}${ddhh.slice(4, 6)}Z`;
   const rangeFromToken = (rangeToken?: string) => {
     if (!rangeToken) return "—";
@@ -357,79 +322,69 @@ function parseTafGroups(tafRaw?: string): TafGroup[] {
     return `${ddhhToZ(a)} → ${ddhhToZ(b)}`;
   };
 
-  const groupsOut: TafGroup[] = groups.map((g) => {
+  return groups.map((g) => {
     const rawText = g.rawTokens.join(" ").trim() || "—";
     let range = "—";
     if (g.kind === "FM") {
-      // FMddhhmm => show start only
       const st = g.startToken || "";
       range = st ? `${st.slice(2, 4)}${st.slice(4, 6)}Z →` : "—";
     } else {
       range = rangeFromToken(g.rangeToken);
     }
-
-    // flight rule heuristic from group raw
-    const fr = classifyFlightRuleFromText(rawText);
-
-    return { kind: g.kind, range, raw: rawText, flightRule: fr };
+    return { kind: g.kind, range, raw: rawText, flightRule: classifyFlightRuleFromText(rawText) };
   });
-
-  return groupsOut;
 }
 
 function classifyFlightRuleFromText(text: string): TafGroup["flightRule"] {
   const up = (text || "").toUpperCase();
+  const t = up.split(" ").filter(Boolean);
 
-  // parse vis: 9999 / 8000 / 1500 ... OR 10SM / P6SM
-  let visSm: number | null = null;
+  // vis
   let visM: number | null = null;
+  let visSm: number | null = null;
 
-  const mTok = up.split(" ").filter(Boolean);
-
-  const vM = mTok.find((t) => /^\d{4}$/.test(t));
+  const vM = t.find((x) => /^\d{4}$/.test(x));
   if (vM) visM = Number(vM);
 
-  const vP = mTok.find((t) => /^P\d+SM$/.test(t));
+  const vP = t.find((x) => /^P\d+SM$/.test(x));
   if (vP) visSm = Number(vP.slice(1, -2));
 
-  const vS = mTok.find((t) => /^\d+SM$/.test(t));
+  const vS = t.find((x) => /^\d+SM$/.test(x));
   if (vS) visSm = Number(vS.slice(0, -2));
 
-  // ceiling from BKN/OVC/VV
+  // ceiling
   let ceilFt: number | null = null;
-  for (const t of mTok) {
-    if (/^(BKN|OVC|VV)\d{3}$/.test(t)) {
-      const ft = Number(t.slice(3)) * 100;
+  for (const x of t) {
+    if (/^(BKN|OVC|VV)\d{3}$/.test(x)) {
+      const ft = Number(x.slice(3)) * 100;
       if (!isNaN(ft)) ceilFt = ceilFt === null ? ft : Math.min(ceilFt, ft);
     }
   }
 
-  // convert meters to sm rough (1sm=1609m)
   const visSmFromM = visM !== null ? visM / 1609 : null;
   const v = visSm ?? visSmFromM;
 
   if (v === null && ceilFt === null) return "UNK";
-
-  // LIFR: ceil <500 or vis <1
   if ((ceilFt !== null && ceilFt < 500) || (v !== null && v < 1)) return "LIFR";
-  // IFR: ceil <1000 or vis <3
   if ((ceilFt !== null && ceilFt < 1000) || (v !== null && v < 3)) return "IFR";
-  // MVFR: ceil <3000 or vis <5
   if ((ceilFt !== null && ceilFt < 3000) || (v !== null && v < 5)) return "MVFR";
   return "VFR";
 }
 
 /* ===========================
-   UI helpers
+   Level helpers
 =========================== */
 
 function levelRank(l: WxLevel) {
   return l === "RED" ? 3 : l === "AMBER" ? 2 : 1;
 }
-
 function maxLevel(a: WxLevel, b: WxLevel): WxLevel {
   return levelRank(a) >= levelRank(b) ? a : b;
 }
+
+/* ===========================
+   UI style helpers
+=========================== */
 
 function levelPillStyle(level: WxLevel): React.CSSProperties {
   if (level === "RED") {
@@ -442,7 +397,7 @@ function levelPillStyle(level: WxLevel): React.CSSProperties {
       background: "#ffe5e5",
       border: "1px solid #e55353",
       color: "#8b1f1f",
-      fontWeight: 700,
+      fontWeight: 800,
     };
   }
   if (level === "AMBER") {
@@ -455,7 +410,7 @@ function levelPillStyle(level: WxLevel): React.CSSProperties {
       background: "#fff4e5",
       border: "1px solid #f0a500",
       color: "#7a4a00",
-      fontWeight: 700,
+      fontWeight: 800,
     };
   }
   return {
@@ -467,7 +422,7 @@ function levelPillStyle(level: WxLevel): React.CSSProperties {
     background: "#e7f7ef",
     border: "1px solid #2ecc71",
     color: "#0b5c2d",
-    fontWeight: 700,
+    fontWeight: 800,
   };
 }
 
@@ -488,7 +443,7 @@ function frPill(fr: TafGroup["flightRule"]) {
   const base: React.CSSProperties = {
     padding: "6px 10px",
     borderRadius: 999,
-    fontWeight: 700,
+    fontWeight: 900,
     fontSize: 12,
     border: "1px solid #ddd",
     background: "#fff",
@@ -543,38 +498,39 @@ export default function Page() {
     return RWY_DB[icaoKey]?.runways ?? [];
   }, [icaoKey]);
 
-  // --- METAR RAW / fields (fallback) ---
+  // --- RAW strings ---
   const metarRaw = data?.metar?.raw || "";
   const tafRaw = data?.taf?.raw || "";
 
+  // --- METAR fields (fallback to RAW) ---
   const metarWindParsed = useMemo(() => {
-    // prefer API metar.wind else parse from raw
+    // Prefer API metar.wind if valid, else parse RAW
     const apiWind = data?.metar?.wind?.toUpperCase();
     if (apiWind && /^(VRB|\d{3})\d{2,3}(G\d{2,3})?KT$/.test(apiWind)) {
-      return parseMetarWindFromRaw(`METAR XXXX 000000Z ${apiWind} 9999 SKC Q1013`); // hack: reuse parser
+      return parseMetarWindFromRaw(`METAR XXXX 000000Z ${apiWind} 9999 SKC Q1013`);
     }
     return parseMetarWindFromRaw(metarRaw);
-  }, [data, metarRaw]);
+  }, [data?.metar?.wind, metarRaw]);
 
   const metarVis = useMemo(() => {
     return data?.metar?.visibility || parseVisibilityFromRaw(metarRaw) || "";
-  }, [data, metarRaw]);
+  }, [data?.metar?.visibility, metarRaw]);
 
   const metarQnh = useMemo(() => {
     const q = data?.metar?.qnh;
     if (q) return q;
     return parseQnhFromRaw(metarRaw) || "";
-  }, [data, metarRaw]);
+  }, [data?.metar?.qnh, metarRaw]);
 
   const metarClouds = useMemo(() => {
     const c = data?.metar?.clouds;
-    if (c && c.length > 0) return c;
+    if (c && c.length) return c;
     return parseCloudsFromRaw(metarRaw);
-  }, [data, metarRaw]);
+  }, [data?.metar?.clouds, metarRaw]);
 
   const metarWx = useMemo(() => {
     return data?.metar?.wx || parseWxPhenomenaFromRaw(metarRaw) || "";
-  }, [data, metarRaw]);
+  }, [data?.metar?.wx, metarRaw]);
 
   const ceilingFt = useMemo(() => getCeilingFt(metarClouds), [metarClouds]);
 
@@ -595,17 +551,14 @@ export default function Page() {
       const reasons: string[] = [];
 
       if (metarWindParsed.dirDeg === null) {
-        // VRB: cannot compute exact direction-based per RWY
-        // Use conservative: cross = speed (steady/gust). Treat as AMBER by default, RED if exceeds gust limit.
+        // VRB: conservative
         level = "AMBER";
         reasons.push("VRB wind (direction unknown)");
-
         if (gustCross !== null && gustCross > limitGust) {
           level = "RED";
-          reasons.push(`Gust ${gustCross}kt > limit ${limitGust}kt`);
+          reasons.push(`Gust crosswind ${gustCross}kt > limit ${limitGust}kt`);
         } else if (steadyCross > limitSteady) {
-          level = maxLevel(level, "AMBER");
-          reasons.push(`Steady ${steadyCross}kt > limit ${limitSteady}kt`);
+          reasons.push(`Steady crosswind ${steadyCross}kt > limit ${limitSteady}kt`);
         }
       } else {
         if (gustCross !== null && gustCross > limitGust) {
@@ -636,58 +589,37 @@ export default function Page() {
     return worst;
   }, [crosswindRows]);
 
-  // --- Overall WX LEVEL ---
+  // --- Overall WX LEVEL + reasons (front-controlled) ---
   const overall = useMemo(() => {
     const serverLevel: WxLevel = data?.wx_analysis?.level || "GREEN";
-    const serverReasonsRaw: string[] = [...(data?.wx_analysis?.reasons || [])];
+    const serverReasons = [...(data?.wx_analysis?.reasons || [])];
 
-    // サーバが返した "Ceiling present" は「Ceiling < 3000ft のときだけ」残す
-    const hasServerCeilingReason = serverReasonsRaw.some((r) =>
-      r.toLowerCase().includes("ceiling present")
-    );
-
-    const serverReasons = serverReasonsRaw.filter((r) => {
-      const s = r.toLowerCase();
-      if (s.includes("ceiling present")) {
-        return ceilingFt !== null && ceilingFt < 3000;
-      }
+    // ① server reasonsから "ceiling present" を一旦消す（条件をフロントで統一）
+    const filteredServerReasons = serverReasons.filter((r) => {
+      const s = (r || "").toLowerCase();
+      if (s.includes("ceiling present")) return false;
       return true;
     });
 
-    // まずサーバ判定をベースにする
     let level: WxLevel = serverLevel;
-    const reasons: string[] = [...serverReasons];
+    const reasons: string[] = [...filteredServerReasons];
 
-    // サーバが「Ceiling present」でAMBERにしてるっぽいのに、
-    // 実際のceilingが3000ft以上なら AMBER を解除（GREENへ）
-    if (serverLevel === "AMBER" && hasServerCeilingReason && !(ceilingFt !== null && ceilingFt < 3000)) {
-      level = "GREEN";
-    }
-
-    // フロント側：Ceiling < 3000ft の時だけ AMBER + 理由追加
+    // ② Ceiling present は ceiling < 3000ft の時だけ
     if (ceilingFt !== null && ceilingFt < 3000) {
       level = maxLevel(level, "AMBER");
       reasons.push(`Ceiling present (<3000ft): ${ceilingFt}ft`);
     }
 
-    // Crosswind は常に合成
+    // ③ Crosswind 反映
     level = maxLevel(level, crosswindWorstLevel);
     if (crosswindWorstLevel === "RED") reasons.push("Crosswind limit exceeded (RED)");
     else if (crosswindWorstLevel === "AMBER") reasons.push("Crosswind caution (AMBER)");
 
-    // 重複除去
     const uniq = Array.from(new Set(reasons.filter(Boolean)));
-
     return { level, reasons: uniq };
-  }, [data, ceilingFt, crosswindWorstLevel]);
-
-
+  }, [data?.wx_analysis?.level, data?.wx_analysis?.reasons, ceilingFt, crosswindWorstLevel]);
 
   const updatedUtc = data?.time || "";
-
-  /* ===========================
-     Render
-  =========================== */
 
   return (
     <div style={{ background: "#f6f7f9", minHeight: "100vh", padding: 28 }}>
@@ -706,14 +638,14 @@ export default function Page() {
           }}
         >
           <div>
-            <div style={{ fontSize: 36, fontWeight: 800, marginBottom: 6 }}>ARI UI Test</div>
+            <div style={{ fontSize: 36, fontWeight: 900, marginBottom: 6 }}>ARI UI Test</div>
             <div style={{ color: "#666", fontSize: 14, marginBottom: 14 }}>
               ICAO入力 → METAR/TAF取得 → WX注意喚起（UI先行）
             </div>
 
             <div style={levelPillStyle(overall.level)}>
               <span>WX LEVEL: {overall.level}</span>
-              <span style={{ fontWeight: 600, fontSize: 13 }}>
+              <span style={{ fontWeight: 700, fontSize: 13 }}>
                 {overall.level === "GREEN"
                   ? "通常運航可（監視継続）"
                   : overall.level === "AMBER"
@@ -742,7 +674,7 @@ export default function Page() {
           }}
         >
           <div style={{ flex: 1 }}>
-            <div style={{ fontSize: 13, color: "#444", fontWeight: 700, marginBottom: 6 }}>ICAO</div>
+            <div style={{ fontSize: 13, color: "#444", fontWeight: 900, marginBottom: 6 }}>ICAO</div>
             <input
               value={icao}
               onChange={(e) => setIcao(e.target.value)}
@@ -767,7 +699,7 @@ export default function Page() {
               border: "1px solid #111",
               background: "#111",
               color: "#fff",
-              fontWeight: 800,
+              fontWeight: 900,
               cursor: "pointer",
               minWidth: 130,
             }}
@@ -783,7 +715,7 @@ export default function Page() {
               border: "1px solid #d1d5db",
               background: "#fff",
               color: "#111",
-              fontWeight: 800,
+              fontWeight: 900,
               cursor: "pointer",
               minWidth: 120,
             }}
@@ -803,15 +735,8 @@ export default function Page() {
           }}
         >
           {/* Key Summary */}
-          <div
-            style={{
-              background: "#fff",
-              borderRadius: 18,
-              border: "1px solid #e5e7eb",
-              padding: 18,
-            }}
-          >
-            <div style={{ fontSize: 20, fontWeight: 800, marginBottom: 14 }}>Key Summary</div>
+          <div style={{ background: "#fff", borderRadius: 18, border: "1px solid #e5e7eb", padding: 18 }}>
+            <div style={{ fontSize: 20, fontWeight: 900, marginBottom: 14 }}>Key Summary</div>
 
             <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12 }}>
               <div style={miniCard()}>
@@ -849,17 +774,14 @@ export default function Page() {
                 {metarClouds && metarClouds.length ? metarClouds.join(", ") : "—"}
               </div>
               <div style={{ fontSize: 12, color: "#777", marginTop: 6 }}>
-                Ceiling:{" "}
-                {ceilingFt === null ? "—" : `${ceilingFt} ft`}{" "}
-                {ceilingFt !== null && ceilingFt < 3000 ? "(<3000ft)" : ""}
+                Ceiling: {ceilingFt === null ? "—" : `${ceilingFt} ft`}
+                {ceilingFt !== null && ceilingFt < 3000 ? " (<3000ft)" : ""}
               </div>
             </div>
 
             <div style={{ ...bigCard(), marginTop: 12 }}>
               <div style={miniLabel()}>WX (METAR)</div>
-              <div style={{ ...miniValue(), fontSize: 14 }}>
-                {metarWx ? metarWx : "—"}
-              </div>
+              <div style={{ ...miniValue(), fontSize: 14 }}>{metarWx ? metarWx : "—"}</div>
             </div>
 
             <div style={{ fontSize: 12, color: "#777", marginTop: 10 }}>
@@ -868,15 +790,8 @@ export default function Page() {
           </div>
 
           {/* METAR/TAF */}
-          <div
-            style={{
-              background: "#fff",
-              borderRadius: 18,
-              border: "1px solid #e5e7eb",
-              padding: 18,
-            }}
-          >
-            <div style={{ fontSize: 20, fontWeight: 800, marginBottom: 4 }}>METAR / TAF</div>
+          <div style={{ background: "#fff", borderRadius: 18, border: "1px solid #e5e7eb", padding: 18 }}>
+            <div style={{ fontSize: 20, fontWeight: 900, marginBottom: 4 }}>METAR / TAF</div>
             <div style={{ color: "#777", fontSize: 12, marginBottom: 12 }}>原文はカード表示（折返し対応）</div>
 
             <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12 }}>
@@ -892,9 +807,10 @@ export default function Page() {
             </div>
 
             <div style={{ borderTop: "1px solid #eee", marginTop: 14, paddingTop: 12 }}>
-              <div style={{ fontSize: 13, fontWeight: 800, marginBottom: 6 }}>
+              <div style={{ fontSize: 13, fontWeight: 900, marginBottom: 6 }}>
                 判定理由（reasons） / {overall.level}
               </div>
+
               {overall.reasons.length ? (
                 <ul style={{ margin: 0, paddingLeft: 18, color: "#333" }}>
                   {overall.reasons.map((r, i) => (
@@ -904,19 +820,19 @@ export default function Page() {
                   ))}
                 </ul>
               ) : (
-                <div style={{ color: "#777", fontSize: 13 }}>まだ理由がありません（解析ロジックは次フェーズで追加します）。</div>
+                <div style={{ color: "#777", fontSize: 13 }}>—</div>
               )}
             </div>
 
             {data?.status === "NG" && (
-              <div style={{ marginTop: 12, color: "#b00020", fontWeight: 800 }}>
+              <div style={{ marginTop: 12, color: "#b00020", fontWeight: 900 }}>
                 Error: {data?.error || "unknown"}
               </div>
             )}
 
             {showRaw && (
               <div style={{ marginTop: 12 }}>
-                <div style={{ fontSize: 13, fontWeight: 800, marginBottom: 6 }}>RAW JSON</div>
+                <div style={{ fontSize: 13, fontWeight: 900, marginBottom: 6 }}>RAW JSON</div>
                 <pre
                   style={{
                     background: "#0b1020",
@@ -935,35 +851,17 @@ export default function Page() {
         </div>
 
         {/* TAF Timeline */}
-        <div
-          style={{
-            background: "#fff",
-            borderRadius: 18,
-            border: "1px solid #e5e7eb",
-            padding: 18,
-            marginTop: 18,
-          }}
-        >
+        <div style={{ background: "#fff", borderRadius: 18, border: "1px solid #e5e7eb", padding: 18, marginTop: 18 }}>
           <div style={{ fontSize: 18, fontWeight: 900 }}>TAF Timeline（時系列）</div>
           <div style={{ color: "#777", fontSize: 12, marginTop: 4 }}>
-            Validity / TEMPO / BECMG を視覚化（UI確認用）
+            Validity / TEMPO / BECMG / FM を視覚化（UI確認用）
           </div>
 
           {tafGroups.length === 0 ? (
             <div style={{ marginTop: 14, color: "#777" }}>—</div>
           ) : (
             <>
-              {/* top tags */}
-              <div
-                style={{
-                  display: "flex",
-                  flexWrap: "wrap",
-                  gap: 10,
-                  marginTop: 14,
-                  alignItems: "center",
-                  justifyContent: "space-between",
-                }}
-              >
+              <div style={{ display: "flex", flexWrap: "wrap", gap: 10, marginTop: 14, alignItems: "center", justifyContent: "space-between" }}>
                 <div style={{ display: "flex", flexWrap: "wrap", gap: 10 }}>
                   {tafGroups.map((g, i) => (
                     <div
@@ -984,7 +882,6 @@ export default function Page() {
                   ))}
                 </div>
 
-                {/* legend */}
                 <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
                   {frPill("VFR")}
                   {frPill("MVFR")}
@@ -994,18 +891,9 @@ export default function Page() {
                 </div>
               </div>
 
-              {/* groups detail */}
               <div style={{ marginTop: 14, display: "grid", gap: 12 }}>
                 {tafGroups.map((g, i) => (
-                  <div
-                    key={i}
-                    style={{
-                      border: "1px solid #e5e7eb",
-                      borderRadius: 14,
-                      padding: 14,
-                      background: "#fff",
-                    }}
-                  >
+                  <div key={i} style={{ border: "1px solid #e5e7eb", borderRadius: 14, padding: 14, background: "#fff" }}>
                     <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 10 }}>
                       <div style={{ display: "inline-flex", alignItems: "center", gap: 10 }}>
                         <span style={{ ...tagStyle(g.kind), padding: "6px 10px", borderRadius: 999, fontWeight: 900, fontSize: 12 }}>
@@ -1013,7 +901,6 @@ export default function Page() {
                         </span>
                         <span style={{ color: "#555", fontSize: 12 }}>{g.range}</span>
                       </div>
-
                       {frPill(g.flightRule)}
                     </div>
 
@@ -1030,15 +917,7 @@ export default function Page() {
         </div>
 
         {/* Crosswind */}
-        <div
-          style={{
-            background: "#fff",
-            borderRadius: 18,
-            border: "1px solid #e5e7eb",
-            padding: 18,
-            marginTop: 18,
-          }}
-        >
+        <div style={{ background: "#fff", borderRadius: 18, border: "1px solid #e5e7eb", padding: 18, marginTop: 18 }}>
           <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", gap: 14, flexWrap: "wrap" }}>
             <div>
               <div style={{ fontSize: 18, fontWeight: 900 }}>Crosswind（RWY別）</div>
@@ -1049,24 +928,14 @@ export default function Page() {
 
             <div style={{ display: "flex", gap: 10, flexWrap: "wrap", alignItems: "center" }}>
               <div style={inputPill()}>
-                <span style={{ fontSize: 12, color: "#444", fontWeight: 800 }}>Steady limit</span>
-                <input
-                  type="number"
-                  value={limitSteady}
-                  onChange={(e) => setLimitSteady(Number(e.target.value))}
-                  style={numInput()}
-                />
+                <span style={{ fontSize: 12, color: "#444", fontWeight: 900 }}>Steady limit</span>
+                <input type="number" value={limitSteady} onChange={(e) => setLimitSteady(Number(e.target.value))} style={numInput()} />
                 <span style={{ fontSize: 12, color: "#777" }}>kt</span>
               </div>
 
               <div style={inputPill()}>
-                <span style={{ fontSize: 12, color: "#444", fontWeight: 800 }}>Gust limit</span>
-                <input
-                  type="number"
-                  value={limitGust}
-                  onChange={(e) => setLimitGust(Number(e.target.value))}
-                  style={numInput()}
-                />
+                <span style={{ fontSize: 12, color: "#444", fontWeight: 900 }}>Gust limit</span>
+                <input type="number" value={limitGust} onChange={(e) => setLimitGust(Number(e.target.value))} style={numInput()} />
                 <span style={{ fontSize: 12, color: "#777" }}>kt</span>
               </div>
             </div>
@@ -1077,23 +946,14 @@ export default function Page() {
               RWY DBに未登録です（{icaoKey}）。RWY_DBに追加してください。
             </div>
           ) : !metarWindParsed ? (
-            <div style={{ marginTop: 14, color: "#777" }}>
-              風情報がありません（METAR未取得 or 解析不可）。
-            </div>
+            <div style={{ marginTop: 14, color: "#777" }}>風情報がありません（METAR未取得 or 解析不可）。</div>
           ) : (
             <div style={{ marginTop: 14, display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(240px, 1fr))", gap: 12 }}>
               {crosswindRows.map((r) => (
-                <div
-                  key={r.rwy}
-                  style={{
-                    borderRadius: 16,
-                    padding: 14,
-                    ...rwyCardStyle(r.level),
-                  }}
-                >
+                <div key={r.rwy} style={{ borderRadius: 16, padding: 14, ...rwyCardStyle(r.level) }}>
                   <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 10 }}>
                     <div style={{ fontWeight: 900, fontSize: 16 }}>
-                      RWY {r.rwy} <span style={{ fontSize: 12, fontWeight: 700, color: "#555" }}>({r.mag}°)</span>
+                      RWY {r.rwy} <span style={{ fontSize: 12, fontWeight: 800, color: "#555" }}>({r.mag}°)</span>
                     </div>
                     <div style={{ fontWeight: 900, fontSize: 12 }}>{r.level}</div>
                   </div>
@@ -1110,13 +970,8 @@ export default function Page() {
                       </div>
                     )}
 
-                    <div style={{ marginTop: 4, color: "#555", fontSize: 12 }}>
-                      Head/Tail: {r.head} kt
-                    </div>
-
-                    <div style={{ marginTop: 8, color: "#333", fontSize: 12 }}>
-                      {r.reason}
-                    </div>
+                    <div style={{ marginTop: 4, color: "#555", fontSize: 12 }}>Head/Tail: {r.head} kt</div>
+                    <div style={{ marginTop: 8, color: "#333", fontSize: 12 }}>{r.reason}</div>
                   </div>
                 </div>
               ))}
@@ -1137,35 +992,19 @@ export default function Page() {
 =========================== */
 
 function miniCard(): React.CSSProperties {
-  return {
-    border: "1px solid #e5e7eb",
-    borderRadius: 14,
-    padding: 12,
-    background: "#fafafa",
-  };
+  return { border: "1px solid #e5e7eb", borderRadius: 14, padding: 12, background: "#fafafa" };
 }
 function bigCard(): React.CSSProperties {
-  return {
-    border: "1px solid #e5e7eb",
-    borderRadius: 14,
-    padding: 12,
-    background: "#fafafa",
-  };
+  return { border: "1px solid #e5e7eb", borderRadius: 14, padding: 12, background: "#fafafa" };
 }
 function miniLabel(): React.CSSProperties {
-  return { fontSize: 12, color: "#666", fontWeight: 800, marginBottom: 6 };
+  return { fontSize: 12, color: "#666", fontWeight: 900, marginBottom: 6 };
 }
 function miniValue(): React.CSSProperties {
   return { fontSize: 18, fontWeight: 900, color: "#111" };
 }
 function rawBox(): React.CSSProperties {
-  return {
-    border: "1px solid #e5e7eb",
-    borderRadius: 14,
-    padding: 12,
-    background: "#fafafa",
-    minHeight: 120,
-  };
+  return { border: "1px solid #e5e7eb", borderRadius: 14, padding: 12, background: "#fafafa", minHeight: 120 };
 }
 function rawText(): React.CSSProperties {
   return {
@@ -1178,25 +1017,8 @@ function rawText(): React.CSSProperties {
   };
 }
 function inputPill(): React.CSSProperties {
-  return {
-    display: "inline-flex",
-    alignItems: "center",
-    gap: 8,
-    padding: "10px 12px",
-    border: "1px solid #e5e7eb",
-    borderRadius: 12,
-    background: "#fafafa",
-  };
+  return { display: "inline-flex", alignItems: "center", gap: 8, padding: "10px 12px", border: "1px solid #e5e7eb", borderRadius: 12, background: "#fafafa" };
 }
 function numInput(): React.CSSProperties {
-  return {
-    width: 70,
-    padding: "8px 10px",
-    border: "1px solid #d1d5db",
-    borderRadius: 10,
-    fontSize: 14,
-    fontWeight: 800,
-    outline: "none",
-    background: "#fff",
-  };
+  return { width: 70, padding: "8px 10px", border: "1px solid #d1d5db", borderRadius: 10, fontSize: 14, fontWeight: 900, outline: "none", background: "#fff" };
 }
