@@ -4,21 +4,21 @@ type Props = {
   rawTaf: string;
 };
 
+type Segment = {
+  type: "BASE" | "BECMG" | "TEMPO" | "FM";
+  label: string;
+  period?: string;
+};
+
 export default function TafTimeline({ rawTaf }: Props) {
   if (!rawTaf || rawTaf.trim() === "") {
     return <div>—</div>;
   }
 
   const tokens = rawTaf.split(/\s+/);
-  const timeline: {
-    type: "BASE" | "BECMG" | "TEMPO" | "FM";
-    label: string;
-    period?: string;
-  }[] = [];
+  const timeline: Segment[] = [];
 
-  /* ===============================
-     BASE is ALWAYS present
-  ================================ */
+  // BASE is always present
   timeline.push({
     type: "BASE",
     label: "BASE",
@@ -53,28 +53,19 @@ export default function TafTimeline({ rawTaf }: Props) {
 
   return (
     <div style={{ display: "flex", gap: 12, flexWrap: "wrap" }}>
-      {timeline.map((p, i) => (
+      {timeline.map((s, i) => (
         <div
           key={i}
           style={{
             border: "1px solid #ccc",
-            padding: "10px 14px",
-            borderRadius: 10,
-            minWidth: 110,
-            background:
-              p.type === "BASE"
-                ? "#eef3ff"
-                : p.type === "BECMG"
-                ? "#e9f7ee"
-                : p.type === "TEMPO"
-                ? "#fff4e6"
-                : "#f0f6ff",
+            padding: "10px 12px",
+            borderRadius: 8,
+            minWidth: 90,
+            background: "#fafafa",
           }}
         >
-          <div style={{ fontWeight: 800 }}>{p.label}</div>
-          {p.period && (
-            <div style={{ fontSize: 12, marginTop: 4 }}>{p.period}</div>
-          )}
+          <strong>{s.label}</strong>
+          {s.period && <div>{s.period}</div>}
         </div>
       ))}
     </div>
