@@ -639,27 +639,46 @@ export default function Page() {
   // --- Overall WX LEVEL ---
   const overall = useMemo(() => {
     const serverLevel: WxLevel = data?.wx_analysis?.level || "GREEN";
-    let level: WxLevel = serverLevel;
-    const reasons: string[] = [...(data?.wx_analysis?.reasons || [])];
 
-    // Ceiling present only when < 3000ft
-    if (ceilingFt !== null && ceilingFt < 3000) {
+    // ✅ server reasons をコピー
+    let reasons: string[] = [...(data?.wx_analysis?.reasons || [])];
+
+    // ✅ "Ceiling present" は 3000ft未満の時だけ許可（それ以外は消す）
+    const ceilingOk = ceilingFt !== null && ceilingFt < 3000;
+    reasons = reasons.filter((r) => {
+      const s = (r || "").toLowerCase();
+      const looksLikeCeiling =
+        s.includes("ceiling present") || s.includes("ceiling");
+      return !looksLikeCeiling || ceilingOk;
+    });
+
+    // ✅ serverLevelが「ceilingだけ」でAMBERになっているケースは無視したい
+    // （※他の理由が残っていればserverLevelは尊重）
+    const serverOnlyCeiling =
+      (data?.wx_analysis?.reasons || []).length > 0 &&
+      reasons.length === 0 && // ceiling理由を消した結果、何も残らない
+      serverLevel === "AMBER" &&
+      !ceilingOk;
+
+    let level: WxLevel = serverOnlyCeiling ? "GREEN" : serverLevel;
+
+    // ✅ Ceiling present は 3000ft未満の時だけ（あなたの仕様）
+    if (ceilingOk) {
       level = maxLevel(level, "AMBER");
-      // 「Ceiling present」は3000ft未満のときだけ出す
       reasons.push(`Ceiling present (<3000ft): ${ceilingFt}ft`);
     }
 
-    // Crosswind affects overall
+    // ✅ Crosswind は常に反映
     level = maxLevel(level, crosswindWorstLevel);
-
     if (crosswindWorstLevel === "RED") reasons.push("Crosswind limit exceeded (RED)");
     else if (crosswindWorstLevel === "AMBER") reasons.push("Crosswind caution (AMBER)");
 
-    // normalize duplicates
+    // 重複削除
     const uniq = Array.from(new Set(reasons.filter(Boolean)));
 
     return { level, reasons: uniq };
   }, [data, ceilingFt, crosswindWorstLevel]);
+
 
   const updatedUtc = data?.time || "";
 
