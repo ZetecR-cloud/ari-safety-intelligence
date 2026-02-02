@@ -14,23 +14,41 @@ export async function GET(req: Request) {
 
     const metarURL =
       `https://aviationweather.gov/api/data/metar?ids=${icao}&format=json`;
+    const tafURL =
+      `https://aviationweather.gov/api/data/taf?ids=${icao}&format=json`;
 
-    const res = await fetch(metarURL, { cache: "no-store" });
-    if (!res.ok) {
+    const [metarRes, tafRes] = await Promise.all([
+      fetch(metarURL, { cache: "no-store" }),
+      fetch(tafURL, { cache: "no-store" }),
+    ]);
+
+    if (!metarRes.ok) {
       return NextResponse.json(
-        { ok: false, error: "METAR fetch failed", status: res.status },
+        { ok: false, error: "METAR fetch failed", status: metarRes.status },
+        { status: 502 }
+      );
+    }
+    if (!tafRes.ok) {
+      return NextResponse.json(
+        { ok: false, error: "TAF fetch failed", status: tafRes.status },
         { status: 502 }
       );
     }
 
-    const data: any = await res.json();
-    const metar0 = Array.isArray(data) ? data[0] : null;
+    const metarData: any = await metarRes.json();
+    const tafData: any = await tafRes.json();
+
+    const metar0 = Array.isArray(metarData) ? metarData[0] : null;
+    const taf0 = Array.isArray(tafData) ? tafData[0] : null;
 
     return NextResponse.json({
       ok: true,
       icao,
       metar: {
         raw: metar0?.rawOb ?? null,
+      },
+      taf: {
+        raw: taf0?.rawTAF ?? null,
       },
     });
   } catch (e: any) {
@@ -46,4 +64,3 @@ export async function GET(req: Request) {
     );
   }
 }
-
