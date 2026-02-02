@@ -1,4 +1,6 @@
 import { NextResponse } from "next/server";
+import { analyzeTafRisk } from "../../lib/wx/tafRisk";
+
 
 export async function GET(req: Request) {
   try {
