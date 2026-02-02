@@ -44,7 +44,6 @@ export async function GET(req: Request) {
     const metarRaw = metar0?.rawOb ?? "";
     const tafRaw = taf0?.rawTAF ?? "";
 
-    // analyzeTafRisk の引数仕様が違っても落ちないように防御
     let tafRisk: any = null;
     try {
       tafRisk = analyzeTafRisk(tafRaw);
@@ -72,4 +71,3 @@ export async function GET(req: Request) {
     );
   }
 }
-
