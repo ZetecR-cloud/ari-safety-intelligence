@@ -1,8 +1,12 @@
 import { NextResponse } from "next/server";
+<<<<<<< HEAD
 import { judgeWx } from "@/lib/wx/tafRisk";
 
 
 
+=======
+import { analyzeTafRisk } from "@/lib/wx/tafRisk";
+>>>>>>> a10c501 (fix: use analyzeTafRisk)
 
 
 
