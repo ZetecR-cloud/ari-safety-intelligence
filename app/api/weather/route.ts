@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
-import { judgeWx } from "@/app/lib/wx/wxJudge";
+import ... from "@/lib/wx/wxJudge";
+
 
 type AwMetar = {
   rawOb: string;
