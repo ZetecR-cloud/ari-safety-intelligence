@@ -1,5 +1,5 @@
 import { NextResponse } from "next/server";
-import { analyzeTafRisk } from "../../lib/wx/tafRisk";
+import { analyzeTafRisk } from "../../../lib/wx/tafRisk";
 
 export async function GET(req: Request) {
   try {
@@ -42,7 +42,7 @@ export async function GET(req: Request) {
     const metar0 = Array.isArray(metarData) ? metarData[0] : null;
     const taf0 = Array.isArray(tafData) ? tafData[0] : null;
 
-    let tafRisk: any = null;
+    let tafRisk = null;
     try {
       tafRisk = analyzeTafRisk(taf0?.rawTAF ?? "");
     } catch {
