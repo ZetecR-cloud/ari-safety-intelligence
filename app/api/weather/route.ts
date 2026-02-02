@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
-<<<<<<< HEAD
-import { judgeWx } from "@/lib/wx/tafRisk";
+import { analyzeTafRisk } from "@/lib/wx/tafRisk";
+
 
 
 
