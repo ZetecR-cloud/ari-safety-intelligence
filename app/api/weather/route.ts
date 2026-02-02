@@ -1,7 +1,6 @@
 import { NextResponse } from "next/server";
 import { analyzeTafRisk } from "../../lib/wx/tafRisk";
 
-
 export async function GET(req: Request) {
   try {
     const { searchParams } = new URL(req.url);
@@ -43,15 +42,19 @@ export async function GET(req: Request) {
     const metar0 = Array.isArray(metarData) ? metarData[0] : null;
     const taf0 = Array.isArray(tafData) ? tafData[0] : null;
 
+    let tafRisk: any = null;
+    try {
+      tafRisk = analyzeTafRisk(taf0?.rawTAF ?? "");
+    } catch {
+      tafRisk = null;
+    }
+
     return NextResponse.json({
       ok: true,
       icao,
-      metar: {
-        raw: metar0?.rawOb ?? null,
-      },
-      taf: {
-        raw: taf0?.rawTAF ?? null,
-      },
+      metar: { raw: metar0?.rawOb ?? null },
+      taf:   { raw: taf0?.rawTAF ?? null },
+      tafRisk,
     });
   } catch (e: any) {
     return NextResponse.json(
