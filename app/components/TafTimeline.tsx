@@ -196,3 +196,4 @@ function TimelineBar({ tafRaw }: { tafRaw: string }) {
     </div>
   );
 }
+<TimelineBar tafRaw={tafRaw} />
