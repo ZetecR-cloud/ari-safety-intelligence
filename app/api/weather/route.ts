@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
-import ... from "@/lib/wx/wxJudge";
+import { judgeWx } from "@/lib/wx/wxJudge";
+
 
 
 
