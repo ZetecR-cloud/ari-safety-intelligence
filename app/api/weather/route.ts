@@ -1,24 +1,15 @@
 import { NextResponse } from "next/server";
 import { analyzeTafRisk } from "../../lib/wx/tafRisk";
 
-type AwMetar = {
-  rawOb: string;
-  icaoId?: string;
-  wdir?: string;
-  wspd?: string;
-  clouds?: string[];
-};
-
-type AwTaf = {
-  rawTAF: string;
-};
-
 export async function GET(req: Request) {
   try {
     const { searchParams } = new URL(req.url);
     const icao = (searchParams.get("icao") ?? "").trim();
     if (!icao) {
-      return NextResponse.json({ ok: false, error: "ICAO code is required" }, { status: 400 });
+      return NextResponse.json(
+        { ok: false, error: "ICAO code is required" },
+        { status: 400 }
+      );
     }
 
     const upper = icao.toUpperCase();
@@ -33,36 +24,52 @@ export async function GET(req: Request) {
 
     if (!metarRes.ok) {
       return NextResponse.json(
-        { ok: false, error: `METAR fetch failed`, status: metarRes.status },
+        { ok: false, error: "METAR fetch failed", status: metarRes.status },
+        { status: 502 }
+      );
+    }
+    if (!tafRes.ok) {
+      return NextResponse.json(
+        { ok: false, error: "TAF fetch failed", status: tafRes.status },
         { status: 502 }
       );
     }
 
-    const metars = (await metarRes.json()) as AwMetar[];
-    const tafs = tafRes.ok ? ((await tafRes.json()) as AwTaf[]) : [];
+    const metarJson: any = await metarRes.json();
+    const tafJson: any = await tafRes.json();
 
-    const metar = metars?.[0];
-    const taf = tafs?.[0];
+    const metar0 = Array.isArray(metarJson) ? metarJson[0] : metarJson?.[0];
+    const taf0 = Array.isArray(tafJson) ? tafJson[0] : tafJson?.[0];
 
-    if (!metar?.rawOb) {
-      return NextResponse.json({ ok: false, error: "METAR not available" }, { status: 404 });
+    const metarRaw = metar0?.rawOb ?? "";
+    const tafRaw = taf0?.rawTAF ?? "";
+
+    // analyzeTafRisk の引数仕様が違っても落ちないように防御
+    let tafRisk: any = null;
+    try {
+      tafRisk = analyzeTafRisk(tafRaw);
+    } catch {
+      tafRisk = null;
     }
-
-    const tafRisk = taf?.rawTAF ? analyzeTafRisk(taf.rawTAF) : null;
 
     return NextResponse.json({
       ok: true,
       icao: upper,
-      metar,
-      taf: taf?.rawTAF ?? null,
+      sources: ["aviationweather.gov"],
+      metar: {
+        raw: metarRaw,
+        wdir: metar0?.wdir != null ? String(metar0.wdir) : undefined,
+        wspd: metar0?.wspd != null ? String(metar0.wspd) : undefined,
+        clouds: Array.isArray(metar0?.clouds) ? metar0.clouds : [],
+      },
+      taf: { raw: tafRaw },
       tafRisk,
-      time: new Date().toISOString(),
     });
   } catch (e: any) {
-    console.error("API /weather crashed:", e);
     return NextResponse.json(
-      { ok: false, message: e?.message ?? String(e), name: e?.name, stack: e?.stack },
+      { ok: false, error: e?.message ?? "Unknown error" },
       { status: 500 }
     );
   }
 }
+
