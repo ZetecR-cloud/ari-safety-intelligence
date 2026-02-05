@@ -9,10 +9,8 @@ type ApiWeatherResp = {
   status?: "OK" | "NG";
   icao?: string;
   message?: string;
-
   metar?: { raw?: string };
   taf?: { raw?: string };
-
   tafRisk?: {
     hardRed?: boolean;
     softAmber?: boolean;
@@ -37,13 +35,6 @@ export default function Page() {
 
     try {
       const r = await fetch(`/api/weather?icao=${encodeURIComponent(q)}`, { cache: "no-store" });
-
       if (!r.ok) {
         const t = await r.text().catch(() => "");
         throw new Error(`HTTP ${r.status} ${r.statusText} ${t}`.trim());
-      }
-
-      const j = (await r.json()) as ApiWeatherResp;
-      setData(j);
-
-      // API側が ok
