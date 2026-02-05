@@ -1,177 +1,72 @@
 "use client";
 
-import { useMemo, useState } from "react";
+import React, { useEffect, useState } from "react";
 import TafTimeline from "@/components/TafTimeline";
 
-type WxJudgement = {
-  level: "GREEN" | "AMBER" | "RED";
-  reasons: string[];
-  ceilingFt: number | null;
+type WxResp = {
+  status: "OK" | "NG";
+  icao?: string;
+  metar?: { raw?: string };
+  taf?: { raw?: string };
+  message?: string;
 };
-
-type WxMetar = {
-  station_id: string;
-  wind: string;
-  visibility: string | null;
-  altimeter: string | null;
-  clouds: string[];
-  raw_text: string;
-};
-
-type WxResponse =
-  | {
-      status: "OK";
-      icao: string;
-      metar: WxMetar;
-      taf: string | null;
-      wx_analysis: WxJudgement;
-      time: string;
-    }
-  | {
-      status?: "ERROR";
-      error: string;
-    };
 
 export default function Page() {
-  const [icao, setIcao] = useState("");
-  const [data, setData] = useState<WxResponse | null>(null);
-  const [loading, setLoading] = useState(false);
+  const [icao, setIcao] = useState("RJTT");
+  const [data, setData] = useState<WxResp | null>(null);
+  const [err, setErr] = useState<string | null>(null);
 
-  async function getWeather() {
-    const code = icao.trim().toUpperCase();
-    if (!code) return;
-
-    setLoading(true);
+  useEffect(() => {
+    let alive = true;
+    setErr(null);
     setData(null);
 
-    try {
-      const res = await fetch(`/api/weather?icao=${encodeURIComponent(code)}`, {
-        cache: "no-store",
+    fetch(`/api/wx?icao=${encodeURIComponent(icao)}`)
+      .then(async (r) => {
+        const j = (await r.json()) as WxResp;
+        if (!alive) return;
+        setData(j);
+      })
+      .catch((e) => {
+        if (!alive) return;
+        setErr(String(e?.message ?? e));
       });
 
-      const json = (await res.json()) as WxResponse;
-      setData(json);
-    } catch {
-      setData({ error: "Weather API error" });
-    } finally {
-      setLoading(false);
-    }
-  }
-
-  const isOk = data && "status" in data && data.status === "OK";
-  const reasons = useMemo(() => {
-    if (!isOk) return [];
-    return data.wx_analysis?.reasons ?? [];
-  }, [isOk, data]);
-
-  const level = useMemo(() => {
-    if (!isOk) return "—";
-    return data.wx_analysis?.level ?? "—";
-  }, [isOk, data]);
+    return () => {
+      alive = false;
+    };
+  }, [icao]);
 
   return (
-    <main style={{ padding: 30, fontFamily: "sans-serif" }}>
-      {/* ICAO INPUT */}
-      <div
-        style={{
-          display: "flex",
-          gap: 10,
-          alignItems: "center",
-          marginBottom: 20,
-        }}
-      >
-        <div style={{ width: 70, fontWeight: 800 }}>ICAO</div>
-        <input
-          placeholder="RJTT / KJFK / ROAH"
-          value={icao}
-          onChange={(e) => setIcao(e.target.value.toUpperCase())}
-          style={{ padding: 10, width: 260 }}
-        />
-        <button
-          onClick={getWeather}
-          style={{ padding: "10px 14px", fontWeight: 700 }}
-        >
-          Get Weather
-        </button>
-      </div>
+    <main className="mx-auto max-w-3xl p-4">
+      <div className="rounded-2xl border p-4 shadow-sm">
+        <div className="text-lg font-semibold">ARI Safety Intelligence</div>
 
-      {loading && <div>Loading…</div>}
-
-      {!loading && !data && <div>—</div>}
-
-      {!loading && data && !isOk && (
-        <div style={{ color: "#b00" }}>
-          Error: {"error" in data ? data.error : "Unknown error"}
+        <div className="mt-3 flex flex-wrap items-center gap-2">
+          <input
+            className="w-28 rounded-xl border px-3 py-2 text-sm"
+            value={icao}
+            onChange={(e) => setIcao(e.target.value.toUpperCase())}
+            placeholder="RJTT"
+          />
+          <div className="text-xs opacity-70">/api/wx?icao=XXXX を叩いて TAF Timeline を描画</div>
         </div>
-      )}
 
-      {isOk && (
-        <>
-          <h2>Key Summary</h2>
+        {err ? <div className="mt-3 text-sm">Error: {err}</div> : null}
 
-          <div style={{ display: "grid", gap: 8, maxWidth: 520 }}>
-            <div>
-              <strong>Station:</strong> {data.metar.station_id}
-            </div>
-            <div>
-              <strong>Wind:</strong> {data.metar.wind}
-            </div>
-            <div>
-              <strong>Visibility:</strong> {data.metar.visibility ?? "—"}
-            </div>
-            <div>
-              <strong>QNH(hPa):</strong> {data.metar.altimeter ?? "—"}
-            </div>
-            <div>
-              <strong>Clouds:</strong>{" "}
-              {(data.metar.clouds ?? []).join(", ") || "—"}
-            </div>
+        <div className="mt-4 space-y-3">
+          <div className="rounded-xl border p-3">
+            <div className="text-sm font-semibold">METAR</div>
+            <div className="mt-2 text-sm opacity-80">{data?.metar?.raw ?? "—"}</div>
           </div>
 
-          <h2 style={{ marginTop: 30 }}>METAR / TAF</h2>
+          <TafTimeline tafRaw={data?.taf?.raw ?? ""} />
+        </div>
 
-          <div style={{ display: "flex", gap: 20 }}>
-            <pre
-              style={{
-                background: "#f6f6f6",
-                padding: 12,
-                width: "50%",
-                whiteSpace: "pre-wrap",
-              }}
-            >
-              {data.metar.raw_text}
-            </pre>
-
-            <pre
-              style={{
-                background: "#f6f6f6",
-                padding: 12,
-                width: "50%",
-                whiteSpace: "pre-wrap",
-              }}
-            >
-              {data.taf ?? "NO TAF"}
-            </pre>
-          </div>
-
-          <h3 style={{ marginTop: 30 }}>
-            判定理由（{level}）
-          </h3>
-
-          {reasons.length === 0 ? (
-            <div>—</div>
-          ) : (
-            <ul>
-              {reasons.map((r, i) => (
-                <li key={`${i}-${r}`}>{r}</li>
-              ))}
-            </ul>
-          )}
-
-          <h2 style={{ marginTop: 40 }}>TAF Timeline</h2>
-          <TafTimeline rawTaf={data.taf ?? ""} />
-        </>
-      )}
+        <div className="mt-4 rounded-xl bg-black/5 p-3 text-xs">
+          status: {data?.status ?? "—"} / message: {data?.message ?? "—"}
+        </div>
+      </div>
     </main>
   );
 }
