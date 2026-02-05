@@ -1,199 +1,146 @@
-// --- add near top of TafTimeline.tsx (inside file, outside component ok) ---
-type TafSeg = {
-  label: string;      // "BASE" / "TEMPO" / "BECMG" / "FM" etc
-  text: string;       // raw line
-  start?: Date;       // segment start (UTC)
-  end?: Date;         // segment end (UTC)
+"use client";
+
+import React, { useMemo, useState } from "react";
+import { parseTafToSegments, type TafSegment } from "@/app/lib/wx/tafParse";
+
+type Props = {
+  tafRaw: string | null | undefined;
+  now?: Date;
 };
 
-function pad2(n: number) { return String(n).padStart(2, "0"); }
-
-// Parse TAF validity like "0206/0312" using issue time as reference.
-// We assume UTC times (TAF times are Z unless local formats, but aviation TAF standard is UTC).
-function parseTafValidity(tafRaw: string): { start?: Date; end?: Date; issue?: Date } {
-  // Example: "TAF AMD RJCC 020837Z 0208/0312 ..."
-  const m = tafRaw.match(/\b(\d{2})(\d{2})(\d{2})Z\b/);  // ddhhmmZ
-  const v = tafRaw.match(/\b(\d{2})(\d{2})\/(\d{2})(\d{2})\b/); // ddhh/ddhh
-
-  if (!m || !v) return {};
-
-  const now = new Date(); // used only for month/year anchor
-  const year = now.getUTCFullYear();
-  const month = now.getUTCMonth(); // 0-based
-
-  const issueDay = Number(m[1]), issueH = Number(m[2]), issueMin = Number(m[3]);
-  const issue = new Date(Date.UTC(year, month, issueDay, issueH, issueMin, 0));
-
-  const sd = Number(v[1]), sh = Number(v[2]);
-  const ed = Number(v[3]), eh = Number(v[4]);
-
-  let start = new Date(Date.UTC(year, month, sd, sh, 0, 0));
-  let end = new Date(Date.UTC(year, month, ed, eh, 0, 0));
-
-  // handle month roll if end < start (e.g. 3121/0109)
-  if (end.getTime() < start.getTime()) {
-    end = new Date(Date.UTC(year, month + 1, ed, eh, 0, 0));
-  }
-
-  // If issue date seems outside validity range by > 20 days, month roll adjustment may be needed,
-  // but keep it simple for now (works for typical ops windows).
-  return { start, end, issue };
+function pad2(n: number) {
+  return String(n).padStart(2, "0");
 }
 
-// Extract segment window for TEMPO/BECMG like "TEMPO 0217/0300" or "BECMG 0208/0210"
-function parseWindowFromText(text: string, year: number, month: number): { start?: Date; end?: Date } {
-  const w = text.match(/\b(\d{2})(\d{2})\/(\d{2})(\d{2})\b/); // ddhh/ddhh
-  if (!w) return {};
-  const sd = Number(w[1]), sh = Number(w[2]);
-  const ed = Number(w[3]), eh = Number(w[4]);
-  let start = new Date(Date.UTC(year, month, sd, sh, 0, 0));
-  let end = new Date(Date.UTC(year, month, ed, eh, 0, 0));
-  if (end.getTime() < start.getTime()) {
-    end = new Date(Date.UTC(year, month + 1, ed, eh, 0, 0));
-  }
-  return { start, end };
+function fmtLocal(d: Date) {
+  // ローカル（ユーザーPC）表示：YYYY-MM-DD HH:MM
+  return `${d.getFullYear()}-${pad2(d.getMonth() + 1)}-${pad2(d.getDate())} ${pad2(d.getHours())}:${pad2(d.getMinutes())}`;
 }
 
-// Minimal block split: we keep BASE first line (header+first conditions), then split on TEMPO/BECMG/FM/PROB.
-function splitTafBlocks(tafRaw: string): TafSeg[] {
-  const raw = (tafRaw || "").trim();
-  if (!raw) return [];
-
-  const { start, end } = parseTafValidity(raw);
-  const now = new Date();
-  const year = now.getUTCFullYear();
-  const month = now.getUTCMonth();
-
-  // Tokenize by spaces but keep "FMxxxx" attached
-  const tokens = raw.replace(/\s+/g, " ").split(" ");
-
-  const segs: TafSeg[] = [];
-  let cur: TafSeg = { label: "BASE", text: "" };
-
-  const flush = () => {
-    const t = cur.text.trim();
-    if (!t) return;
-    // Attach windows for TEMPO/BECMG blocks when possible
-    if (cur.label === "TEMPO" || cur.label === "BECMG") {
-      const win = parseWindowFromText(t, year, month);
-      cur.start = win.start;
-      cur.end = win.end;
-    }
-    // For BASE: use validity window
-    if (cur.label === "BASE") {
-      cur.start = start;
-      cur.end = end;
-    }
-    segs.push(cur);
-  };
-
-  // Recognize new-block starters
-  const isStarter = (tok: string) =>
-    tok === "TEMPO" || tok === "BECMG" || tok.startsWith("FM") || tok.startsWith("PROB");
-
-  for (let i = 0; i < tokens.length; i++) {
-    const tok = tokens[i];
-
-    if (isStarter(tok) && cur.text.trim() !== "") {
-      flush();
-      if (tok.startsWith("FM")) cur = { label: "FM", text: tok };
-      else if (tok.startsWith("PROB")) cur = { label: "PROB", text: tok };
-      else cur = { label: tok, text: tok };
-      continue;
-    }
-
-    // Continue current
-    cur.text += (cur.text ? " " : "") + tok;
-  }
-  flush();
-
-  return segs;
+function clamp01(x: number) {
+  if (x < 0) return 0;
+  if (x > 1) return 1;
+  return x;
 }
 
-// --- add inside TafTimeline component (near bottom): timeline bar renderer ---
-function TimelineBar({ tafRaw }: { tafRaw: string }) {
-  const { start, end } = parseTafValidity(tafRaw);
-  if (!start || !end) return null;
+export default function TafTimeline({ tafRaw, now }: Props) {
+  const [showRaw, setShowRaw] = useState(false);
+  const baseNow = now ?? new Date();
 
-  const segs = splitTafBlocks(tafRaw);
+  const segs = useMemo(() => {
+    const raw = (tafRaw ?? "").trim();
+    if (!raw) return [] as TafSegment[];
+    return parseTafToSegments(raw, baseNow);
+  }, [tafRaw, baseNow]);
 
-  const totalMs = end.getTime() - start.getTime();
-  if (totalMs <= 0) return null;
+  const timeRange = useMemo(() => {
+    if (segs.length === 0) return null;
+    const start = segs[0].from;
+    const end = segs[segs.length - 1].to;
+    return { start, end };
+  }, [segs]);
 
-  const fmt = (d: Date) => `${pad2(d.getUTCDate())}/${pad2(d.getUTCHours())}Z`;
-
-  // Ticks every 3 hours
-  const ticks: Date[] = [];
-  const tick = new Date(start.getTime());
-  tick.setUTCMinutes(0, 0, 0);
-  while (tick.getTime() <= end.getTime()) {
-    ticks.push(new Date(tick.getTime()));
-    tick.setUTCHours(tick.getUTCHours() + 3);
+  if (!tafRaw || !tafRaw.trim()) {
+    return (
+      <div className="rounded-2xl border p-4 shadow-sm">
+        <div className="text-sm font-semibold">TAF Timeline</div>
+        <div className="mt-2 text-sm opacity-70">TAFがありません。</div>
+      </div>
+    );
   }
 
   return (
-    <div style={{ marginTop: 14 }}>
-      <div style={{ fontWeight: 900, marginBottom: 6 }}>TAF Flow (Time Bar)</div>
+    <div className="rounded-2xl border p-4 shadow-sm">
+      <div className="flex items-start justify-between gap-3">
+        <div>
+          <div className="text-sm font-semibold">TAF Timeline</div>
+          <div className="mt-1 text-xs opacity-70">
+            Now: {fmtLocal(baseNow)}
+            {timeRange ? ` / Range: ${fmtLocal(timeRange.start)} → ${fmtLocal(timeRange.end)}` : ""}
+          </div>
+        </div>
 
-      <div style={{ position: "relative", height: 44, background: "#f6f6f6", borderRadius: 12, padding: "10px 10px 8px" }}>
-        {/* Base axis */}
-        <div style={{ position: "absolute", left: 10, right: 10, top: 18, height: 6, background: "#e2e2e2", borderRadius: 999 }} />
+        <button
+          className="rounded-xl border px-3 py-1 text-xs hover:opacity-80"
+          onClick={() => setShowRaw((v) => !v)}
+        >
+          {showRaw ? "Hide RAW" : "Show RAW"}
+        </button>
+      </div>
 
-        {/* Tick marks */}
-        {ticks.map((t, i) => {
-          const x = ((t.getTime() - start.getTime()) / totalMs) * 100;
-          return (
-            <div key={i} style={{ position: "absolute", left: `calc(10px + ${x}% * (100% - 20px) / 100)`, top: 10 }}>
-              <div style={{ width: 1, height: 20, background: "#c8c8c8" }} />
-              <div style={{ fontSize: 10, opacity: 0.75, transform: "translateX(-50%)", marginTop: 2 }}>
-                {pad2(t.getUTCHours())}Z
-              </div>
+      {/* Bars */}
+      {segs.length === 0 ? (
+        <div className="mt-3 text-sm opacity-70">TAFの解析に失敗しました（形式を確認してください）。</div>
+      ) : (
+        <div className="mt-4 space-y-2">
+          {segs.map((s, idx) => (
+            <SegmentRow key={`${s.kind}-${idx}-${s.from.toISOString()}`} seg={s} now={baseNow} range={timeRange} />
+          ))}
+        </div>
+      )}
+
+      {showRaw ? (
+        <pre className="mt-4 whitespace-pre-wrap rounded-xl bg-black/5 p-3 text-xs leading-relaxed">
+{tafRaw.trim()}
+        </pre>
+      ) : null}
+    </div>
+  );
+}
+
+function SegmentRow({
+  seg,
+  now,
+  range,
+}: {
+  seg: TafSegment;
+  now: Date;
+  range: { start: Date; end: Date } | null;
+}) {
+  const active = now >= seg.from && now < seg.to;
+
+  const pct = useMemo(() => {
+    if (!range) return { left: 0, width: 1 };
+    const total = range.end.getTime() - range.start.getTime();
+    const leftMs = seg.from.getTime() - range.start.getTime();
+    const widthMs = seg.to.getTime() - seg.from.getTime();
+    const left = total > 0 ? leftMs / total : 0;
+    const width = total > 0 ? widthMs / total : 1;
+    return { left: clamp01(left), width: clamp01(width) };
+  }, [seg.from, seg.to, range]);
+
+  const label = `${seg.kind}${seg.qual ? ` (${seg.qual})` : ""}`;
+
+  return (
+    <div className="rounded-xl border p-3">
+      <div className="flex items-center justify-between gap-3">
+        <div className="min-w-0">
+          <div className="truncate text-sm font-semibold">{label}</div>
+          <div className="mt-1 text-xs opacity-70">
+            {seg.from.toLocaleString()} → {seg.to.toLocaleString()}
+          </div>
+          {seg.rawLine ? (
+            <div className="mt-2 text-xs opacity-80">
+              <span className="font-semibold">RAW:</span> {seg.rawLine}
             </div>
-          );
-        })}
+          ) : null}
+        </div>
 
-        {/* Segments */}
-        {segs.map((s, idx) => {
-          if (!s.start || !s.end) return null;
-          const left = ((s.start.getTime() - start.getTime()) / totalMs) * 100;
-          const width = ((s.end.getTime() - s.start.getTime()) / totalMs) * 100;
-
-          // Only draw meaningful windows; BASE is full window -> keep but low prominence.
-          const isBase = s.label === "BASE";
-          const bg = isBase ? "#b9d6ff" : (s.label === "TEMPO" ? "#ffd6a6" : "#c8f3d0");
-          const height = isBase ? 8 : 12;
-          const top = isBase ? 17 : 14;
-
-          return (
-            <div
-              key={idx}
-              title={`${s.label}: ${s.text}`}
-              style={{
-                position: "absolute",
-                left: `calc(10px + ${left}% * (100% - 20px) / 100)`,
-                top,
-                width: `calc(${width}% * (100% - 20px) / 100)`,
-                height,
-                background: bg,
-                borderRadius: 999,
-                border: "1px solid rgba(0,0,0,0.08)",
-                boxSizing: "border-box",
-              }}
-            />
-          );
-        })}
-
-        {/* Range label */}
-        <div style={{ position: "absolute", left: 10, right: 10, bottom: 6, display: "flex", justifyContent: "space-between", fontSize: 11, opacity: 0.75 }}>
-          <span>{fmt(start)}</span>
-          <span>{fmt(end)}</span>
+        <div className="shrink-0">
+          {active ? <span className="rounded-full border px-3 py-1 text-xs">ACTIVE</span> : null}
         </div>
       </div>
 
-      <div style={{ marginTop: 6, fontSize: 12, opacity: 0.8 }}>
-        Tips: Hover segments to see the full block text.
+      {/* timeline bar */}
+      <div className="mt-3 h-3 w-full rounded-full bg-black/5">
+        <div
+          className={`h-3 rounded-full ${active ? "bg-black/40" : "bg-black/20"}`}
+          style={{
+            marginLeft: `${pct.left * 100}%`,
+            width: `${pct.width * 100}%`,
+          }}
+        />
       </div>
     </div>
   );
 }
-<TimelineBar tafRaw={tafRaw} />
