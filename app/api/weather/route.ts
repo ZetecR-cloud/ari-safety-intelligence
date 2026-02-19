@@ -6,7 +6,7 @@ export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 export const revalidate = 0;
 
-const BUILD_TAG = "ARI9_ROUTE_2666d27_v1";
+const BUILD_TAG = "ARI9_59642ac2-8b93-43f1-a40f-a729a320546e";
 
 export async function GET(request: Request) {
   try {
@@ -56,3 +56,4 @@ export async function GET(request: Request) {
   }
 }
 // deploy-stamp: 20260220_001243
+
