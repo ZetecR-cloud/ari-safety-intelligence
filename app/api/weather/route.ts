@@ -1,23 +1,23 @@
-import { NextResponse } from "next/server";
+﻿import { NextResponse } from "next/server";
 
-// NOTE:
-// - This route is intentionally minimal and BOM/garbage-character safe.
-// - If you want to call analyzeTafRisk later, we can add it back cleanly.
+export const runtime = "nodejs";
+export const dynamic = "force-dynamic";
+export const revalidate = 0;
 
 export async function GET(request: Request) {
-  const { searchParams } = new URL(request.url);
-  const icao = (searchParams.get("icao") ?? "").trim().toUpperCase();
+  try {
+    const { searchParams } = new URL(request.url);
+    const icao = (searchParams.get("icao") ?? "").trim().toUpperCase();
 
-  if (!icao) {
+    if (!icao) {
+      return NextResponse.json({ ok: false, error: "Missing icao" }, { status: 400 });
+    }
+
     return NextResponse.json(
-      { status: "NG", message: "Missing icao" },
-      { status: 400 }
+      { ok: true, icao },
+      { status: 200, headers: { "Cache-Control": "no-store" } }
     );
+  } catch (e: any) {
+    return NextResponse.json({ ok: false, error: "Unknown error" }, { status: 500 });
   }
-
-  return NextResponse.json({
-    status: "OK",
-    icao,
-    message: "weather route OK (placeholder)"
-  });
 }
