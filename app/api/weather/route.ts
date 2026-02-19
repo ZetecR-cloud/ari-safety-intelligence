@@ -10,14 +10,20 @@ export async function GET(request: Request) {
     const icao = (searchParams.get("icao") ?? "").trim().toUpperCase();
 
     if (!icao) {
-      return NextResponse.json({ ok: false, error: "Missing icao" }, { status: 400 });
+      return NextResponse.json(
+        { ok: false, error: "Missing icao" },
+        { status: 400, headers: { "Cache-Control": "no-store, max-age=0" } }
+      );
     }
 
     return NextResponse.json(
       { ok: true, icao },
-      { status: 200, headers: { "Cache-Control": "no-store" } }
+      { status: 200, headers: { "Cache-Control": "no-store, max-age=0" } }
     );
-  } catch (e: any) {
-    return NextResponse.json({ ok: false, error: "Unknown error" }, { status: 500 });
+  } catch {
+    return NextResponse.json(
+      { ok: false, error: "Unknown error" },
+      { status: 500, headers: { "Cache-Control": "no-store, max-age=0" } }
+    );
   }
 }
