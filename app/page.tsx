@@ -1,40 +1,28 @@
-@'
-"use client";
+﻿"use client";
 
-import React, { useState } from "react";
-import TafTimeline from "../components/TafTimeline";
+import { useEffect, useState } from "react";
 
-type ApiWeatherResp = {
-  ok?: boolean;
-  status?: "OK" | "NG";
-  icao?: string;
-  message?: string;
-  metar?: { raw?: string };
-  taf?: { raw?: string };
-  tafRisk?: {
-    hardRed?: boolean;
-    softAmber?: boolean;
-    reasons?: string[];
-    blocks?: { type: string; text: string }[];
-  };
-};
-
-export default function Page() {
-  const [icao, setIcao] = useState("RJTT");
-  const [loading, setLoading] = useState(false);
-  const [data, setData] = useState<ApiWeatherResp | null>(null);
+export default function Home() {
+  const [data, setData] = useState<any>(null);
   const [err, setErr] = useState<string | null>(null);
 
-  async function onGetWeather() {
-    const q = icao.trim().toUpperCase();
-    if (!q) return;
+  useEffect(() => {
+    (async () => {
+      try {
+        const r = await fetch("/api/weather?icao=RJTT", { cache: "no-store" });
+        const j = await r.json();
+        setData(j);
+      } catch (e: any) {
+        setErr(e?.message ? String(e.message) : "fetch failed");
+      }
+    })();
+  }, []);
 
-    setLoading(true);
-    setErr(null);
-    setData(null);
-
-    try {
-      const r = await fetch(`/api/weather?icao=${encodeURIComponent(q)}`, { cache: "no-store" });
-      if (!r.ok) {
-        const t = await r.text().catch(() => "");
-        throw new Error(`HTTP ${r.status} ${r.statusText} ${t}`.trim());
+  return (
+    <main style={{ padding: 16, fontFamily: "system-ui, sans-serif" }}>
+      <h1>ARI Safety Intelligence</h1>
+      {err && <pre>{err}</pre>}
+      <pre>{JSON.stringify(data, null, 2)}</pre>
+    </main>
+  );
+}
